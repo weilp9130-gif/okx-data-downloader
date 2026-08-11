@@ -1,14 +1,14 @@
-"""OKX 永续合约 K线 全历史 并行下载脚本
+"""OKX 永续合约 K线 全历史 并行下载脚本（每合约回溯版）
 
-需求：对每个合约，从"当前时间"一直往回下载，直到没有数据为止
-（即下载该合约从实际上线到现在的全部历史 K 线）。
+需求：对每个合约，从"当前时间（或指定的 end）"一路往回下载，
+直到没有数据为止（即回溯到该合约实际上线时间，OKX 返回空即停）。
 
 实现方式：
-- 每个合约一个任务，调用 download_range(start=上线时间, end=当前时间)
+- 每个合约一个任务，调用 download_range(start=None, end=end, force_full_range=True)
 - download_range 内部用 OKX history-candles 的 after 参数从最新往回回溯，
-  直到 oldest_ts <= 窗口起点（上线时间）或 OKX 返回空（代表无更早数据）为止。
+  直到 oldest_ts <= 窗口起点 或 OKX 返回空（代表无更早数据）为止。
 - 多合约 ThreadPoolExecutor 并行
-- 增量/断点续传：库里已有的历史窗口自动跳过（windows_covered），重跑不重复
+- 幂等写入（ON CONFLICT DO NOTHING），重跑不重复入库
 - 全局请求限速 + 429 自适应降速（OKXClient 内）+ thread-local Session
 
 用法：
@@ -23,11 +23,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from sqlalchemy import text
-
 from config import Config
 from utils.logger import setup_logging, get_logger
-from database import init_db, dispose_engine, get_engine
+from database import init_db, dispose_engine
 from okx_client import OKXClient
 from downloader.candles import CandleDownloader
 
@@ -43,7 +41,7 @@ def _signal_handler(signum, frame):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description='OKX 永续合约全历史下载')
+    p = argparse.ArgumentParser(description='OKX 永续合约全历史并行下载（每合约回溯）')
     p.add_argument('--insts', default=None,
                    help='指定交易对，逗号分隔（默认全部USDT永续）')
     p.add_argument('--bar', default='1m', help='K线粒度，默认1m')
@@ -79,18 +77,6 @@ def get_swap_contracts(client):
     return contracts
 
 
-def inst_has_data(inst_id, bar):
-    """该合约在库中是否已有任何数据（用于决定是否从上线时间全量补）"""
-    try:
-        with get_engine().connect() as conn:
-            cnt = conn.execute(
-                text("SELECT COUNT(*) FROM candles WHERE inst_id=:i AND bar=:b"),
-                {"i": inst_id, "b": bar}).scalar()
-        return bool(cnt)
-    except Exception:
-        return False
-
-
 def main():
     args = parse_args()
     cfg = Config()
@@ -100,9 +86,9 @@ def main():
                   max_bytes=cfg.logging.max_bytes,
                   backup_count=cfg.logging.backup_count)
 
-    end = parse_date(args.end) or datetime.now(timezone.utc).replace(tzinfo=None)
-    if end.tzinfo is not None:
-        end = end.replace(tzinfo=None)
+    end = parse_date(args.end)
+    if end is None:
+        end = datetime.now(timezone.utc).replace(tzinfo=None)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -124,38 +110,32 @@ def main():
             logger.error('没有可下载的合约')
             return
 
-        # 为每个合约确定其起步时间（上线时间 listTime，作为回溯下界）
-        tasks = []
-        for c in contracts:
-            inst = c['instId']
-            c_start = None
-            if c.get('listTime'):
-                lt = ms_to_dt(int(c['listTime']))
-                if lt:
-                    c_start = lt
-            tasks.append((inst, bar, c_start, end))
+        tasks = [(c['instId'], bar, c.get('listTime'), end) for c in contracts]
 
         logger.info('=' * 60)
-        logger.info(f'全历史并行下载 | {bar} | 每合约从上线时间回溯到现在')
-        logger.info(f'合约 {len(contracts)} 个 | 并发 {args.workers}')
+        logger.info(f'全历史并行下载（每合约回溯）| {bar} | 至 {end:%Y-%m-%d}')
+        logger.info(f'合约 {len(contracts)} 个 | 并发 {args.workers} '
+                    f'| 每合约从上线时间(或2019)回溯到现在/end')
         logger.info('=' * 60)
 
         ok = fail = 0
         total_rows = 0
 
         def work(task):
-            inst, b, c_start, c_end = task
+            inst, b, list_time, c_end = task
             if _shutdown:
                 return (inst, 0, 'shutdown')
+            c_start = None
+            if list_time:
+                lt = ms_to_dt(int(list_time))
+                if lt:
+                    c_start = lt
             try:
-                # start=None 时 download_range 内部会从该合约最早回溯（默认2019）
-                # 这里传入上线时间作为回溯下界；若已知该合约已有数据则按已覆盖处理
+                # start=None + force_full_range=True：
+                # 从 c_end 一路往回回溯到实际上线时间（listTime/2019），
+                # 不因库内已有近期数据而干扰窗口语义，直到无数据自动停止。
                 n = candle_dl.download_range(
-                    inst, b,
-                    start=c_start,
-                    end=c_end,
-                    force_full_range=True,
-                )
+                    inst, b, start=c_start, end=c_end, force_full_range=True)
                 return (inst, n, None)
             except Exception as e:
                 return (inst, 0, str(e))
@@ -176,7 +156,7 @@ def main():
                     ok += 1
                     total_rows += n
                 if done % 20 == 0:
-                    logger.info(f'[进度] 完成 {done}/{len(tasks)} 合约 '
+                    logger.info(f'[进度] 已完成 {done}/{len(tasks)} 合约 '
                                 f'(成功{ok} 失败{fail}) 累计写入 {total_rows} 根')
 
         logger.info('-' * 60)
