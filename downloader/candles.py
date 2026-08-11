@@ -68,10 +68,10 @@ class CandleDownloader:
         # 统一为UTC naive；若未指定start，自动从OKX最早历史(2019年)开始
         if start is None:
             start = datetime(2019, 1, 1)
-        start = start.replace(tzinfo=None) if start.tzinfo is not None else start
-        end = end.replace(tzinfo=None) if end.tzinfo is not None else end
         if end is None:
             end = datetime.now(timezone.utc).replace(tzinfo=None)
+        start = start.replace(tzinfo=None) if start.tzinfo is not None else start
+        end = end.replace(tzinfo=None) if end.tzinfo is not None else end
 
         # 增量续传：若库中已有该合约/粒度数据，则从最大已存ts开始向下游。
         # force_full_range=True 时跳过（由调用方控制窗口），避免干扰精确窗口。
