@@ -173,11 +173,13 @@ def main():
             inst, b, ss, se = task
             if _shutdown:
                 return (inst, 0, 'shutdown')
-            # 窗口级增量续传
+            # 窗口级增量续传：该窗口已有数据则跳过
             if windows_covered(inst, b, ss, se):
                 return (inst, 0, 'skipped')
             try:
-                n = candle_dl.download_range(inst, b, ss, se)
+                # force_full_range=True：严格按 [ss,se] 窗口下载，
+                # 不因库内已有近期数据而向外推start，保证全历史窗口精确
+                n = candle_dl.download_range(inst, b, ss, se, force_full_range=True)
                 return (inst, n, None)
             except Exception as e:
                 return (inst, 0, str(e))

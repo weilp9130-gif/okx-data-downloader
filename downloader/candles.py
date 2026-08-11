@@ -45,6 +45,7 @@ class CandleDownloader:
         start: datetime,
         end: datetime,
         overwrite: bool = False,
+        force_full_range: bool = False,
     ) -> int:
         """下载指定时间范围内的K线
 
@@ -56,6 +57,10 @@ class CandleDownloader:
             start: 开始时间（UTC, naive）
             end: 结束时间（UTC, naive）
             overwrite: 是否覆盖已有的重复数据
+            force_full_range: 为 True 时禁用"增量续传"（不根据库内已有
+                最大ts 向外推 start），严格按传入的 [start, end] 窗口下载。
+                适用于全历史并行下载等需要精确控制窗口边界的场景；
+                此时窗口级续传由调用方完成。
 
         Returns:
             int: 实际写入的K线条数
@@ -68,8 +73,9 @@ class CandleDownloader:
         if end is None:
             end = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        # 增量续传：若库中已有该合约/粒度数据，则从最大已存ts开始向下游
-        if not overwrite:
+        # 增量续传：若库中已有该合约/粒度数据，则从最大已存ts开始向下游。
+        # force_full_range=True 时跳过（由调用方控制窗口），避免干扰精确窗口。
+        if not overwrite and not force_full_range:
             max_ts = self._get_max_ts(inst_id, bar)
             if max_ts is not None:
                 # 数据库ts带时区，统一为naive UTC
