@@ -1,27 +1,82 @@
-# ===== Python =====
+# ============ Python ============
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
 *.egg-info/
+*.egg
+.eggs/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.whl
+
+# 虚拟环境
 .venv/
 venv/
+env/
+ENV/
 
-# ===== 敏感配置 / 环境变量 =====
+# ============ 测试 / 缓存 ============
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+hypothesis/
+
+# ============ 环境变量 / 敏感配置 ============
+# 本地真实配置（含密钥/密码）一律忽略
 .env
 .env.*
 !.env.template
+config.local.py
 
-# ===== 日志 =====
+# ============ 日志 ============
 logs/
 *.log
+*.log.*
 
-# ===== IDE / 系统 =====
+# ============ IDE / 编辑器 ============
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.workspace
+
+# ============ 操作系统 ============
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# ===== 临时文件 =====
+# ============ 打包 / 发布 ============
+*.zip
+*.tar.gz
+*.7z
+*.rar
+
+# ============ 数据库 / 数据导出 ============
+*.sql
+*.dump
+*.csv
+data/
+backup/
+cluster-*
+
+# ============ 临时目录 ============
 tmp/
 temp/
 *.tmp
+*.temp

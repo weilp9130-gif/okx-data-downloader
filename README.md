@@ -12,16 +12,18 @@
 - ✅ 可配置日志系统（控制台 + 文件轮转）
 - ✅ 环境变量配置管理（`.env`）
 - ✅ 请求限速 + 指数退避重试
+- ✅ **全历史并行下载**（合约 × 时间窗，listTime 精确定位回溯起点）
 
 ## 项目结构
 
 ```
 okx_data_downloader
 ├── main.py           # 程序入口（命令行CLI）
+├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗）
 ├── config.py         # 配置模块（dataclass + .env）
 ├── database.py       # 数据库连接（SQLAlchemy Engine/Session）
 ├── models.py         # ORM数据模型
-├── okx_client.py     # OKX API客户端
+├── okx_client.py     # OKX API客户端（限速/重试/线程本地Session）
 ├── downloader/
 │   ├── __init__.py
 │   ├── candles.py    # K线下载模块
@@ -33,7 +35,7 @@ okx_data_downloader
 ├── env.template      # 环境变量模板
 ├── requirements.txt  # Python依赖
 ├── run_example.py    # 编程式使用示例
-└── logs/             # 日志目录
+└── logs/             # 日志目录（已忽略）
 ```
 
 ## 环境要求
@@ -101,7 +103,30 @@ python main.py --type candles
 python main.py --update --lookback 7
 ```
 
-### 3. 下载资金费率
+### 3. 全历史并行下载（多合约，推荐）
+
+`download_all.py` 用于**批量下载所有 USDT 永续合约的全历史 K 线**，是功能最完整、速度最快的入口。
+
+核心优化：
+- **listTime 下界**：每个合约只回溯到它的实际上线时间（避开新币从 2019 起做无效回溯）
+- **合约 × 时间窗并行**：按天切成时间窗，`ThreadPoolExecutor` 并行拉满吞吐
+- **窗口级断点续传**：已下载窗口自动跳过，`Ctrl+C` 中断后重跑不重复
+
+```bash
+# 全历史下载所有 USDT 永续 1m K线（默认）
+python download_all.py
+
+# 自定义并发数与时间粒度
+python download_all.py --workers 8 --bar 5m
+
+# 指定部分合约 + 起始时间
+python download_all.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP --start 2020-01-01
+
+# 更细的断点粒度（每 7 天一等分）
+python download_all.py --days-per-window 7
+```
+
+### 4. 下载资金费率
 
 ```bash
 # 只下载资金费率（仅合约产品）
