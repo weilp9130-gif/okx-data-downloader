@@ -89,7 +89,7 @@ def setup_logging(
         root_logger.addHandler(file_handler)
 
     # 降噪第三方库日志
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("sqlalchemy").setLevel(logging.WARNING)
     logging.getLogger("okx").setLevel(logging.WARNING)
 

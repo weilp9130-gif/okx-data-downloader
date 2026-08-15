@@ -86,13 +86,18 @@ class OKXClient:
                 pool_maxsize=64,
             )
         else:
+            # 直连模式：底层仅做"复用失效连接"的1次快速重连（backoff 0.5s），
+            # 429/5xx 等状态码与持久性失败统一由上层 _get 重试（降速/冷却/退避），
+            # 避免 urllib3 与 _get 双层重试叠加，把单次失败请求卡住数分钟。
             self._adapter = HTTPAdapter(
                 pool_connections=32,   # 不同主机最大连接数
                 pool_maxsize=32,       # 单主机最大连接池（避免过多连接触发限速）
                 max_retries=Retry(
-                    total=self.MAX_RETRIES,
-                    backoff_factor=1.0,
-                    status_forcelist=[429, 500, 502, 503, 504],
+                    total=1,
+                    connect=1,         # 死连接重连1次（快）
+                    read=1,            # 读失败重试1次
+                    status=0,          # 不按状态码重试，429 交给 _get 处理
+                    backoff_factor=0.5,
                     allowed_methods=["GET"],
                     raise_on_status=False,
                 ),
@@ -246,7 +251,8 @@ class OKXClient:
                     time.sleep(wait)
                     continue
                 if attempt < self.MAX_RETRIES and self._is_retryable(e):
-                    wait = min(2 ** (attempt - 1), 30)   # 1s, 2s, 4s...
+                    # 连接类失败：快速重试（上限10s），避免代理抖动时worker长时间空转
+                    wait = min(2 ** (attempt - 1), 10)   # 1s, 2s, 4s, 8s, 10s
                     logger.warning(
                         "请求失败，%ds后重试(%d/%d): %s %s",
                         wait, attempt, self.MAX_RETRIES, path, e,
