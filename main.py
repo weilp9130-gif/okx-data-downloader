@@ -19,6 +19,7 @@ from utils.logger import setup_logging, get_logger
 from utils.time_utils import parse_date, utc_now
 from database import init_db, dispose_engine
 from okx_client import OKXClient
+from proxy_pool import build_proxy_pool
 from downloader.candles import CandleDownloader
 from downloader.funding import FundingRateDownloader
 
@@ -48,6 +49,23 @@ def parse_args() -> argparse.Namespace:
                         default=None, help="覆盖默认日志级别")
     parser.add_argument("--init-db-only", action="store_true",
                         help="仅初始化数据库表结构，不执行下载")
+    parser.add_argument("--proxy-pool", action="store_true",
+                        help="启用IP代理池（需配置OKX_PROXY_URLS，每币一个IP）")
+    parser.add_argument("--proxy-verify", action="store_true",
+                        help="启动时探测代理池各代理出口IP并统计独立IP数")
+    parser.add_argument("--per-ip-rate", type=int, default=None,
+                        help="每个IP的请求限速（默认读配置OKX_IP_RATE_LIMIT_PER_SECOND）")
+    parser.add_argument("--dynamic", action="store_true",
+                        help="动态IP池：每次下载前自动发现节点/测IP/应用listeners，"
+                             "兼容节点与IP变化的VPN服务商（需Clash/Mihomo运行中）")
+    parser.add_argument("--pool-size", type=int, default=20,
+                        help="动态IP池的独立IP数量上限，默认20")
+    parser.add_argument("--pool-ttl", type=int, default=0,
+                        help="复用节点IP缓存秒数，0=每次重测（默认）")
+    parser.add_argument("--pool-base-port", type=int, default=7891,
+                        help="动态IP池监听起始端口，默认7891")
+    parser.add_argument("--no-prompt", action="store_true",
+                        help="动态模式等待端口就绪超时后不交互提示，直接报错")
 
     return parser.parse_args()
 
@@ -74,8 +92,11 @@ def main() -> None:
             logger.info("数据库初始化完成，程序退出。")
             return
 
-        # 初始化OKX客户端
-        client = OKXClient()
+        # 初始化OKX客户端（可选IP代理池：一个币一个IP并行下载）
+        pool = build_proxy_pool(args)
+        client = OKXClient(proxy_pool=pool)
+        if pool is not None:
+            logger.info(f"代理池模式: {pool.stats()}")
 
         # 解析交易范围
         start, end = _resolve_date_range(args)

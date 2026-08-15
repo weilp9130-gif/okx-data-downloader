@@ -6,9 +6,10 @@
 资金费率按3个成交阶段/8小时一次收取。
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime, timedelta
 
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models import FundingRate
@@ -59,8 +60,20 @@ class FundingRateDownloader:
         start_ms = utc_ms_timestamp(start)
         end_ms = utc_ms_timestamp(end)
 
+        # 增量续传：库内头部数据已覆盖 start 时，从最大已存ts之后开始，
+        # 避免重复下载已有资金费率；头部有缺口时全量幂等拉取补齐。
+        if not overwrite:
+            mn, mx = self._get_min_max_ts(inst_id)
+            if mx is not None:
+                mn_ms = utc_ms_timestamp(mn) if mn else None
+                if mn_ms is not None and mn_ms <= start_ms:
+                    # 头部已覆盖：从库内最大已存ts之后续传
+                    start_ms = utc_ms_timestamp(mx) + 1
+                    start = ms_to_datetime(start_ms).replace(tzinfo=None)
+                # else: 头部有缺口，全量幂等拉取补齐
+
         if end_ms <= start_ms:
-            logger.warning(f"结束时间({end})早于/等于开始时间({start})，跳过下载")
+            logger.info(f"{inst_id} 资金费率已是最新，无需下载")
             return 0
 
         logger.info(
@@ -157,6 +170,21 @@ class FundingRateDownloader:
                 written += result.rowcount or 0
             conn.commit()
         return written
+
+    def _get_min_max_ts(
+        self, inst_id: str
+    ) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """查询库内该合约资金费率的最小/最大时间（用于增量续传）"""
+        engine = get_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT MIN(ts) AS mn, MAX(ts) AS mx "
+                    "FROM funding_rates WHERE inst_id = :i"
+                ),
+                {"i": inst_id},
+            ).one()
+        return row.mn, row.mx
 
     def update_latest(self, inst_id: str, lookback_days: int = 7) -> int:
         """增量更新最近N天的资金费率"""

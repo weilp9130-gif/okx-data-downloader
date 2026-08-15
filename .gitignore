@@ -43,6 +43,9 @@ hypothesis/
 !.env.template
 config.local.py
 
+# ============ 代理池运行时生成的产物（节点名/出口IP/监听配置等） ============
+runtime/
+
 # ============ 日志 ============
 logs/
 *.log

@@ -29,6 +29,22 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _redact_proxy_url(url: str) -> str:
+    """去掉代理URL中的账号密码，避免写日志时泄露凭据"""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            host = parts.hostname or ""
+            if parts.port:
+                host = f"{host}:{parts.port}"
+            return urlunsplit((parts.scheme, host, parts.path,
+                               parts.query, parts.fragment))
+    except Exception:
+        pass
+    return url
+
+
 class OKXClient:
     """OKX公开行情数据客户端（requests实现）
 
@@ -39,9 +55,13 @@ class OKXClient:
     TIMEOUT = 15
     MAX_RETRIES = 5
 
-    def __init__(self):
+    def __init__(self, proxy_pool=None):
         self.cfg = Config().okx
         self.BASE_URL = self.cfg.base_url
+
+        # IP代理池：不为空时使用"一个币一个IP"并行下载模式，
+        # 每个代理拥有独立限速桶，绕过单IP限频瓶颈。
+        self.proxy_pool = proxy_pool
 
         # 代理设置：优先使用显式配置的 PROXY_URL；
         # 否则信任环境变量/系统代理（部分网络环境必须走代理才能访问OKX）
@@ -58,24 +78,33 @@ class OKXClient:
         # 复用连接的 Session（keep-alive）+ 连接池，支持多线程并发下载
         # 每个线程独立 Session（thread-local），避免多线程共享 session 竞争
         self._tl = threading.local()
-        self._adapter = HTTPAdapter(
-            pool_connections=32,   # 不同主机最大连接数
-            pool_maxsize=32,       # 单主机最大连接池（避免过多连接触发限速）
-            max_retries=Retry(
-                total=self.MAX_RETRIES,
-                backoff_factor=1.0,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["GET"],
-                raise_on_status=False,
-            ),
-        )
+        if self.proxy_pool is not None:
+            # 代理池模式下由池内逻辑负责重试/换IP/429冷却，
+            # 底层不做自动重试，避免掩盖429导致IP无法及时冷却。
+            self._adapter = HTTPAdapter(
+                pool_connections=64,
+                pool_maxsize=64,
+            )
+        else:
+            self._adapter = HTTPAdapter(
+                pool_connections=32,   # 不同主机最大连接数
+                pool_maxsize=32,       # 单主机最大连接池（避免过多连接触发限速）
+                max_retries=Retry(
+                    total=self.MAX_RETRIES,
+                    backoff_factor=1.0,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["GET"],
+                    raise_on_status=False,
+                ),
+            )
 
     def _get_session(self):
         """获取当前线程专属的 requests.Session（懒创建复用）"""
         if not hasattr(self._tl, "session"):
             s = requests.Session()
             s.headers.update({"User-Agent": "Mozilla/5.0"})
-            if self.proxies:
+            # 代理池模式下代理按请求传入（每个币绑定不同IP）
+            if self.proxies and self.proxy_pool is None:
                 s.proxies.update(self.proxies)
             s.mount("https://", self._adapter)
             s.mount("http://", self._adapter)
@@ -166,6 +195,9 @@ class OKXClient:
         Raises:
             RuntimeError: OKX业务错误或请求最终失败
         """
+        if self.proxy_pool is not None:
+            return self._get_with_pool(path, params)
+
         last_exc = None
         url = self.BASE_URL + path
 
@@ -235,6 +267,69 @@ class OKXClient:
                     "设置代理地址(如 http://127.0.0.1:7890)，或检查网络/代理是否可用。")
         raise RuntimeError(
             f"请求最终失败(已重试{self.MAX_RETRIES}次): {path} - {last_exc}{hint}"
+        ) from last_exc
+
+    def _get_with_pool(self, path: str, params: dict = None) -> List[dict]:
+        """代理池模式：为每个线程(币)绑定独立代理请求，按IP独立限速
+
+        - 同一线程始终复用同一代理(一个币一个IP)
+        - 429/连接失败：将该代理冷却，重试时自动换到其他健康代理
+        - 不重试OKX业务错误(code != 0)
+        """
+        url = self.BASE_URL + path
+        last_exc = None
+        key = threading.current_thread().name
+
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            proxy = self.proxy_pool.acquire(key=key)
+            try:
+                resp = self._get_session().get(
+                    url,
+                    params=params,
+                    timeout=self.TIMEOUT,
+                    proxies=proxy.proxies,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                resp.raise_for_status()
+                js = resp.json()
+
+                code = js.get("code", "0")
+                if code not in ("0", 0, None):
+                    raise RuntimeError(
+                        f"OKX API error: code={code}, msg={js.get('msg')}, path={path}"
+                    )
+                self.proxy_pool.report_ok(proxy)
+                return js.get("data", [])
+
+            except RuntimeError:
+                # 业务错误，代理本身没问题，不换IP
+                self.proxy_pool.report_ok(proxy)
+                raise
+            except Exception as e:
+                last_exc = e
+                is_429 = (
+                    isinstance(e, requests.HTTPError)
+                    and e.response is not None
+                    and e.response.status_code == 429
+                )
+                self.proxy_pool.report_fail(proxy, is_429=is_429)
+                if attempt >= self.MAX_RETRIES:
+                    break
+                if is_429:
+                    logger.warning(
+                        "%s 429频控，冷却该代理 %s，换IP重试(%d/%d)",
+                        path, _redact_proxy_url(proxy.url),
+                        attempt, self.MAX_RETRIES,
+                    )
+                else:
+                    logger.warning(
+                        "请求失败，换代理重试(%d/%d): %s %s",
+                        attempt, self.MAX_RETRIES, path, e,
+                    )
+                time.sleep(1.0)
+
+        raise RuntimeError(
+            f"请求最终失败(代理池,已重试{self.MAX_RETRIES}次): {path} - {last_exc}"
         ) from last_exc
 
     # ------------------------------------------------------------------

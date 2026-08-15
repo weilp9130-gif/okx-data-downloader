@@ -102,3 +102,24 @@ class FundingRate(Base):
             "realized_rate": self.realized_rate,
             "funding_time": self.funding_time,
         }
+
+
+class DownloadState(Base):
+    """下载验证水位线：记录 (inst_id, bar) 已确认完整到的时间点
+
+    缺失窗口检测按天比对条数时，会跳过 verified_upto 之前的区间，
+    避免每次运行都重扫整段历史。
+    """
+
+    __tablename__ = "download_state"
+
+    inst_id = Column(String(50), primary_key=True)
+    bar = Column(String(10), primary_key=True)
+    verified_upto = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<DownloadState(inst={self.inst_id}, bar={self.bar}, "
+            f"verified_upto={self.verified_upto})>"
+        )

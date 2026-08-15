@@ -19,11 +19,13 @@
 ```
 okx_data_downloader
 ├── main.py           # 程序入口（命令行CLI）
-├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗）
+├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗，支持IP代理池）
 ├── config.py         # 配置模块（dataclass + .env）
 ├── database.py       # 数据库连接（SQLAlchemy Engine/Session）
 ├── models.py         # ORM数据模型
-├── okx_client.py     # OKX API客户端（限速/重试/线程本地Session）
+├── okx_client.py     # OKX API客户端（限速/重试/线程本地Session/代理池）
+├── proxy_pool.py     # IP代理池（每IP独立限速/健康管理/IP去重探测）
+├── dynamic_pool.py   # ★动态IP代理池（每次下载前自动发现/测IP/应用listeners）
 ├── downloader/
 │   ├── __init__.py
 │   ├── candles.py    # K线下载模块
@@ -32,6 +34,7 @@ okx_data_downloader
 │   ├── __init__.py
 │   ├── logger.py     # 日志系统
 │   └── time_utils.py # 时间工具
+├── runtime/          # 动态池运行时产物（节点缓存/监听配置，已忽略不上传）
 ├── env.template      # 环境变量模板
 ├── requirements.txt  # Python依赖
 ├── run_example.py    # 编程式使用示例
@@ -111,6 +114,7 @@ python main.py --update --lookback 7
 - **listTime 下界**：每个合约只回溯到它的实际上线时间（避开新币从 2019 起做无效回溯）
 - **合约 × 时间窗并行**：按天切成时间窗，`ThreadPoolExecutor` 并行拉满吞吐
 - **窗口级断点续传**：已下载窗口自动跳过，`Ctrl+C` 中断后重跑不重复
+- **IP代理池**：每个币绑定一个独立出口IP，每个IP独立限速，吞吐 ≈ IP数×8 req/s（平滑限速消除429突发后实测可达）
 
 ```bash
 # 全历史下载所有 USDT 永续 1m K线（默认）
@@ -124,6 +128,53 @@ python download_all.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP --start 2020-01-01
 
 # 更细的断点粒度（每 7 天一等分）
 python download_all.py --days-per-window 7
+```
+
+### 3.1 IP代理池：动态模式（推荐，兼容节点/IP变化的VPN）
+
+VPN服务商节点经常变化，**不要写死节点和IP**。使用 `--dynamic` 让程序
+在每次下载前自动完成：发现节点 → 逐个测试出口IP → 选独立IP →
+生成 Mihomo listeners（每节点一个本地端口）→ 写入 Clash Verge
+Merge.yaml → 等待内核重启 → 验证端口 → 构建动态代理池。
+
+```bash
+# 动态IP池：自动选16个独立IP，每IP 2个并发（--workers 自动设为IP数×2）
+python download_all.py --dynamic --pool-size 16
+
+# 用缓存复用上次测试结果（TTL 600s，适合频繁增量运行）
+python download_all.py --dynamic --pool-ttl 600
+
+# 手动查看动态池运行产物（节点IP缓存 / 生成的listeners配置）
+# 位置：runtime/dynamic_pool_cache.json、runtime/mihomo_listeners.yaml
+```
+
+首次使用 `--dynamic` 时，程序会把 listeners 写入 Clash Verge 的
+`Merge.yaml` 并提示**重启内核**（托盘图标 → 重启内核），随后自动轮询
+端口就绪并开始下载。需要 Clash/Mihomo 运行中（external-controller 默认
+`127.0.0.1:9097`，混合端口 `127.0.0.1:7890`）。
+
+> 说明：Mihomo `listeners` 让每个端口流量绕过规则直走指定节点，
+> 从而在**同一时刻**使用多个不同出口IP。节点/IP变化时，下次运行
+> `--dynamic` 会自动重新测试并替换配置。
+
+> 性能实测（2026-08，干净环境）：OKX history-candles 按 IP 限频约
+> 20 请求/2秒。旧版令牌桶会"攒令牌→瞬间抽干"造成请求突发，频繁触发
+> 429；现已改为平滑限速（严格按间隔发放）。配合 16 个独立IP × 每IP 2
+> 线程 × 限速 8/s，实测约 **73 页/秒（≈7300 根K线/秒）且几乎无429**，
+> 相比默认 8 并发串行提升约 8~14 倍。
+
+### 3.2 IP代理池：静态模式
+
+已有固定多IP代理（如付费住宅/机房代理，每个出口IP不同）时，直接在
+`.env` 配置，无需 Clash：
+
+```bash
+# .env
+OKX_PROXY_URLS=http://127.0.0.1:7891,http://127.0.0.1:7892,http://127.0.0.1:7893
+OKX_IP_RATE_LIMIT_PER_SECOND=8
+
+# --workers 建议为 IP 数×2（每IP保持2线程）
+python download_all.py --proxy-pool --proxy-verify --workers 16
 ```
 
 ### 4. 下载资金费率
