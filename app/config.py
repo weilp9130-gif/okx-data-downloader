@@ -46,9 +46,10 @@ class OKXConfig:
         default_factory=lambda: os.getenv("CLASH_PROXY_URL", "http://127.0.0.1:7890")
     )
     # 每个IP的请求限速（OKX按IP限频约20请求/2秒，实测8~10/s最稳，
-    # 过高触发429；平滑限速器已消除突发，见 proxy_pool._TokenBucket）
+    # 过高触发429；平滑限速器已消除突发，见 proxy_pool._TokenBucket。
+    # 代理池模式下默认提到10，单IP/直连场景可通过 OKX_IP_RATE_LIMIT_PER_SECOND 覆盖）
     ip_rate_limit_per_second: int = field(
-        default_factory=lambda: int(os.getenv("OKX_IP_RATE_LIMIT_PER_SECOND", "8"))
+        default_factory=lambda: int(os.getenv("OKX_IP_RATE_LIMIT_PER_SECOND", "10"))
     )
 
     @property

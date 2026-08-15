@@ -56,8 +56,8 @@ SKIP_TYPES = {
 SKIP_PREFIXES = ("剩余流量", "套餐到期", "官网", "[D]", "♻️", "♻", "🏁", "流量")
 
 # 代理失败后的禁用时长
-COOL_429_SECONDS = 15.0
-DISABLE_FAIL_SECONDS = 60.0
+COOL_429_SECONDS = 10.0
+DISABLE_FAIL_SECONDS = 30.0
 STALL_MAX_NONE = 30          # acquire 连续取不到代理的最大次数(每次sleep2s)
 ACQUIRE_NONE_SLEEP = 2.0
 

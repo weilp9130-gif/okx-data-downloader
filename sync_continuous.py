@@ -103,8 +103,8 @@ def parse_args():
                    help='每个IP的请求限速（默认读配置OKX_IP_RATE_LIMIT_PER_SECOND）')
     p.add_argument('--dynamic', action='store_true',
                    help='动态IP池：每次下载前自动发现节点/测IP/应用listeners')
-    p.add_argument('--pool-size', type=int, default=16,
-                   help='动态IP池的独立IP数量上限，默认16')
+    p.add_argument('--pool-size', type=int, default=32,
+                   help='动态IP池的独立IP数量上限，默认32')
     p.add_argument('--pool-ttl', type=int, default=0,
                    help='复用节点IP缓存秒数，0=每次重测（默认）')
     p.add_argument('--pool-base-port', type=int, default=7891,
@@ -569,9 +569,9 @@ def main():
         client = OKXClient(proxy_pool=pool)
         candle_dl = CandleDownloader(client, cfg)
 
-        # 阶段1并发默认值：代理池下每IP 4个并发(上限96)，写库已改每批短连接不受DB池限制
+        # 阶段1并发默认值：代理池下每IP 4个并发(上限128)，写库已改每批短连接不受DB池限制
         if args.workers is None:
-            args.workers = max(4, min(4 * len(pool), 96)) if pool else 16
+            args.workers = max(4, min(4 * len(pool), 128)) if pool else 16
 
         contracts = ([{'instId': i.strip()} for i in args.insts.split(',') if i.strip()]
                      if args.insts else get_swap_contracts(client))
