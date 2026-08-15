@@ -1,26 +1,30 @@
-"""连续同步下载脚本：启动后持续下载最新K线数据，默认24小时后自动退出
+"""连续同步下载脚本：启动后一直运行，先全量追赶，再低资源实时同步
 
-目标：内存/CPU占用低 + 下载速度快，并自动平衡二者
-- 内存低：有界队列(Queue maxsize) + 独立批量写库线程，每轮只取增量(最多
-  max-pages页)，不缓存全量数据；写入采用 ON CONFLICT DO NOTHING 幂等入库
-- CPU低：追平时按K线周期对齐休眠（长睡省CPU）；落后时呼吸式短休连续拉取；
-  会话复用(keep-alive)避免重复TLS握手；按轮汇总日志，不逐请求打日志
-- 速度快：多合约并行(ThreadPoolExecutor) + 可选IP代理池每IP平滑限速
-  （复用 proxy_pool 的平滑限速器，实测8IP可达~53 pages/s且几乎无429）
+两个阶段（日志中明确标注当前阶段）：
 
-同步逻辑：
-- 每轮先查库内每合约最新时间(单次GROUP BY)，再从最新处往前翻最多 max-pages 页，
-  只保留已完结(confirm=='1')且新于库内的K线；攒够批量即由写库线程入库。
-- 追平(本轮取到0行或耗时短于周期) -> 睡到下一根K线收盘后再同步；
-  落后(仍在补缺口) -> 呼吸1秒继续，以接近满载的速度追赶。
-- 到期(--hours，默认24)或收到 Ctrl+C/SIGTERM 后，冲刷队列安全退出。
+阶段1【全量同步/追赶】—— 让数据库数据与OKX API对齐
+  - 复用 CandleDownloader.download_range（缺失窗口检测 + 逐页回溯 + 批量入库），
+    把每个合约缺失的数据一次性补齐到当前时刻（下载量可能很大）。
+  - 此阶段不限制系统资源：高并发（--workers 默认代理池下 IP数×2，最高64）、
+    满载运行，只为尽快追赶。
+  - 全部合约追平（lag < --catchup-lag 分钟）后自动进入阶段2。
+  - 可 --skip-catchup 跳过，直接实时同步（适用于数据本已最新的场景）。
+
+阶段2【实时同步】—— 低资源后台无感持续下载
+  - 每轮只取增量（默认每合约最多 --max-pages 页），有界队列 + 独立写库线程，
+    幂等入库；追平时按K线周期对齐休眠，CPU/内存占用极低。
+  - 默认并发 --rt-workers 4，限制资源占用，后台静默运行。
+  - 定期重同步合约列表（--contracts-sync-interval）以自动纳入新币。
+
+资源策略：阶段1宽松（快），阶段2受限（省），两阶段都遵守OKX每IP平滑限速
+（复用 proxy_pool，避免429风暴——这是API约束而非本机资源限制）。
 
 用法：
-    python sync_continuous.py                             # 默认24小时, 1m K线
-    python sync_continuous.py --hours 0                   # 无限运行
-    python sync_continuous.py --bar 5m --hours 12         # 自定义粒度/时长
+    python sync_continuous.py                              # 默认一直运行
+    python sync_continuous.py --hours 12                   # 运行12小时后退出
+    python sync_continuous.py --skip-catchup               # 跳过追赶，直接实时同步
     python sync_continuous.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
-    python sync_continuous.py --dynamic --pool-size 16    # 配合IP代理池提速
+    python sync_continuous.py --dynamic --pool-size 16     # 配合IP代理池提速
 """
 
 import argparse
@@ -41,12 +45,15 @@ from database import init_db, dispose_engine, get_engine
 from okx_client import OKXClient
 from models import Candle
 from proxy_pool import build_proxy_pool
-from utils.time_utils import ms_to_datetime, utc_now, bar_to_seconds
+from downloader.candles import CandleDownloader
+from utils.time_utils import ms_to_datetime, bar_to_seconds
 
 logger = get_logger(__name__)
 
 _shutdown = False
 STOP = object()
+
+BANNER = '=' * 60
 
 
 def _signal_handler(signum, frame):
@@ -57,22 +64,32 @@ def _signal_handler(signum, frame):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description='OKX 连续同步下载（默认24小时后自动退出，低内存/低CPU）')
+        description='OKX 连续同步下载：先全量追赶OKX数据，再低资源实时同步（默认一直运行）')
     p.add_argument('--insts', default=None,
                    help='指定交易对，逗号分隔（默认全部USDT永续）')
     p.add_argument('--bar', default='1m', help='K线粒度，默认1m')
-    p.add_argument('--hours', type=float, default=24,
-                   help='运行时长(小时)，默认24；0=无限运行')
+    p.add_argument('--hours', type=float, default=0,
+                   help='运行时长(小时)，默认0=无限运行')
     p.add_argument('--workers', type=int, default=None,
-                   help='并行下载数（代理池下默认IP数×2，直连默认8）')
+                   help='阶段1(全量同步)并发数（代理池下默认IP数×2，最高64；直连默认16）')
+    p.add_argument('--rt-workers', type=int, default=4,
+                   help='阶段2(实时同步)并发数，默认4（低资源后台运行）')
+    p.add_argument('--catchup-lag', type=float, default=10,
+                   help='阶段1判定"已追平"的最大落后分钟数，默认10')
+    p.add_argument('--catchup-attempts', type=int, default=3,
+                   help='阶段1对仍落后的合约最多重试轮数，默认3')
+    p.add_argument('--skip-catchup', action='store_true',
+                   help='跳过阶段1全量同步，直接进入阶段2实时同步')
+    p.add_argument('--contracts-sync-interval', type=int, default=1800,
+                   help='阶段2合约列表重同步间隔(秒)，默认1800(30分钟)自动发现新币')
     p.add_argument('--max-pages', type=int, default=10,
-                   help='每轮每合约最多翻几页(每页100根)，默认10')
+                   help='阶段2每轮每合约最多翻几页(每页100根)，默认10')
     p.add_argument('--round-delay', type=int, default=10,
                    help='K线收盘后额外等待秒数，默认10（避免拉到未完结K线）')
     p.add_argument('--queue-size', type=int, default=5000,
-                   help='写库队列容量上限(有界，控制内存)，默认5000')
+                   help='阶段2写库队列容量上限(有界，控制内存)，默认5000')
     p.add_argument('--db-batch', type=int, default=1000,
-                   help='写库批量条数，默认1000')
+                   help='阶段2写库批量条数，默认1000')
     p.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                    default=None, help='日志级别')
@@ -97,16 +114,25 @@ def parse_args():
 
 
 # ----------------------------------------------------------------------
-# 合约列表 / 增量拉取
+# 合约列表 / 水位线
 # ----------------------------------------------------------------------
 def get_swap_contracts(client):
+    """带 listTime 的 USDT 永续合约列表（仅 state=live）"""
     data = client.get_instruments('SWAP')
     contracts = []
     for d in data:
         if d.get('settleCcy') == 'USDT' and d.get('state') == 'live':
-            contracts.append({'instId': d['instId']})
+            contracts.append({'instId': d['instId'], 'listTime': d.get('listTime')})
     contracts.sort(key=lambda x: x['instId'])
     return contracts
+
+
+def ms_to_dt(ms):
+    """毫秒时间戳 -> naive UTC datetime（供 listTime 使用）"""
+    dt = ms_to_datetime(ms)
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def ensure_sync_state(bar, inst_ids):
@@ -154,6 +180,118 @@ def get_latest_ts_map(bar):
     return {r["inst_id"]: r["latest_ts"] for r in rows if r["latest_ts"] is not None}
 
 
+def refresh_watermark(inst, bar):
+    """把某合约在库内的 MAX(ts) 回写 sync_state（阶段1用，逐合约走索引）"""
+    engine = get_engine()
+    with engine.connect() as conn:
+        m = conn.execute(
+            text("SELECT MAX(ts) FROM candles WHERE inst_id = :i AND bar = :b"),
+            {"i": inst, "b": bar}).scalar()
+        if m is not None:
+            conn.execute(text(
+                "INSERT INTO sync_state (inst_id, bar, latest_ts, updated_at) "
+                "VALUES (:i, :b, :t, now()) "
+                "ON CONFLICT (inst_id, bar) DO UPDATE SET "
+                "latest_ts = GREATEST(sync_state.latest_ts, EXCLUDED.latest_ts), "
+                "updated_at = now()"),
+                {"i": inst, "b": bar, "t": m})
+        conn.commit()
+
+
+def catchup_lag_minutes(bar, contracts):
+    """所有已同步合约中最落后的分钟数（无水位的合约不参与判定）"""
+    latest = get_latest_ts_map(bar)
+    now_dt = datetime.now(timezone.utc)
+    lags = []
+    for c in contracts:
+        lt = latest.get(c['instId'])
+        if lt is not None:
+            lags.append((now_dt - lt).total_seconds() / 60.0)
+    return max(lags) if lags else 0.0
+
+
+# ----------------------------------------------------------------------
+# 阶段1：全量同步（追赶，不限制系统资源）
+# ----------------------------------------------------------------------
+def _catchup_contract(candle_dl, inst, bar, end_dt, list_time_ms):
+    try:
+        start = ms_to_dt(list_time_ms) if list_time_ms else None
+        n = candle_dl.download_range(
+            inst, bar, start=start, end=end_dt, list_time=start)
+        return inst, n, None
+    except Exception as e:
+        return inst, 0, str(e)
+
+
+def catch_up_pass(candle_dl, contracts, bar, end_dt, workers):
+    """一轮全量追赶：所有合约并行补齐到 end_dt，并刷新水位线"""
+    done = ok = fail = 0
+    total = 0
+    t0 = time.time()
+    last_log = time.time()
+
+    def work(c):
+        inst, n, err = _catchup_contract(
+            candle_dl, c['instId'], bar, end_dt, c.get('listTime'))
+        return inst, n, err
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(work, c): c['instId'] for c in contracts}
+        for fut in as_completed(futs):
+            inst, n, err = fut.result()
+            done += 1
+            if err:
+                fail += 1
+                logger.error(f'[阶段1 全量同步] {inst}: {err}')
+            else:
+                ok += 1
+                total += n
+                refresh_watermark(inst, bar)
+            now = time.time()
+            if (done % 20 == 0 or done == len(contracts)
+                    or now - last_log >= 30):
+                rate = total / max(now - t0, 0.1)
+                logger.info(
+                    f'[阶段1 全量同步] 进度 {done}/{len(contracts)} 合约 '
+                    f'(成功{ok} 失败{fail}) | 累计写入 {total:,} 根 | '
+                    f'速率 {rate:,.0f} 根/秒 | 已用 {(now - t0) / 60:.1f} 分')
+                last_log = now
+    return total, fail
+
+
+def run_phase1(candle_dl, contracts, bar, args):
+    """阶段1主循环：追赶直到全部追平或重试轮数用尽"""
+    logger.info(BANNER)
+    logger.info('[阶段1 全量同步] 开始：将数据库数据与OKX API对齐到当前时刻')
+    logger.info(f'[阶段1 全量同步] 合约 {len(contracts)} 个 | 并发 {args.workers} '
+                f'| 本阶段不限制系统资源，满载追赶')
+    logger.info(BANNER)
+
+    end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+    attempts = 0
+    while not _shutdown and attempts < args.catchup_attempts:
+        attempts += 1
+        logger.info(f'[阶段1 全量同步] 第 {attempts}/{args.catchup_attempts} 轮追赶开始...')
+        total, fail = catch_up_pass(candle_dl, contracts, bar, end_dt, args.workers)
+        lag = catchup_lag_minutes(bar, contracts)
+        logger.info(
+            f'[阶段1 全量同步] 第 {attempts} 轮完成：写入 {total:,} 根 | '
+            f'失败 {fail} | 当前最大落后 {lag:.1f} 分钟')
+        if lag <= args.catchup_lag:
+            break
+        # 仍有落后：对失败/落后的合约再补一轮
+        if attempts < args.catchup_attempts and not _shutdown:
+            logger.info(f'[阶段1 全量同步] 仍有 {lag:.1f} 分钟落后，重试补齐...')
+
+    lag = catchup_lag_minutes(bar, contracts)
+    logger.info(BANNER)
+    logger.info(f'[阶段1 全量同步] 完成 | 最大落后 {lag:.1f} 分钟 -> 进入阶段2 实时同步')
+    logger.info(BANNER)
+
+
+# ----------------------------------------------------------------------
+# 阶段2：实时同步（增量拉取 + 批量写库，低资源）
+# ----------------------------------------------------------------------
 def fetch_tail(client, inst_id, bar, latest_dt, max_pages):
     """从最新往前翻页，只保留已完结且新于库内 latest_dt 的K线（内存有界）"""
     rows = []
@@ -196,9 +334,6 @@ def fetch_worker(client, contract, latest_map, bar, max_pages):
         return inst, [], str(e)
 
 
-# ----------------------------------------------------------------------
-# 写库
-# ----------------------------------------------------------------------
 def insert_candles_batch(rows):
     if not rows:
         return 0
@@ -258,8 +393,8 @@ def writer_loop(queue, batch_size, flush_interval=2.0, idle_event=None, bar='1m'
                 stats['flushes'] += 1
             if idle_event is not None:
                 idle_event.set()
-            logger.info(f'写库线程退出: 累计入库 {stats["rows"]} 根 | '
-                        f'刷库 {stats["flushes"]} 次')
+            logger.info(f'[阶段2 实时同步] 写库线程退出: 累计入库 '
+                        f'{stats["rows"]} 根 | 刷库 {stats["flushes"]} 次')
             queue.task_done()
             return
         if item is not None:
@@ -281,9 +416,6 @@ def writer_loop(queue, batch_size, flush_interval=2.0, idle_event=None, bar='1m'
             idle_event.set()
 
 
-# ----------------------------------------------------------------------
-# 单轮同步
-# ----------------------------------------------------------------------
 def sync_round(client, contracts, latest_map, queue, workers, bar, max_pages):
     fetched = 0
     errors = 0
@@ -296,7 +428,7 @@ def sync_round(client, contracts, latest_map, queue, workers, bar, max_pages):
             inst, rows, err = fut.result()
             if err:
                 errors += 1
-                logger.error(f'{inst}: {err}')
+                logger.error(f'[阶段2 实时同步] {inst}: {err}')
             elif rows:
                 queue.put(('candles', rows))
                 fetched += len(rows)
@@ -309,8 +441,91 @@ def sleep_interruptible(seconds):
         time.sleep(min(1.0, end - time.time()))
 
 
+def run_phase2(client, contracts, bar, args):
+    """阶段2主循环：低资源实时同步，直到 --hours 到期或收到退出信号"""
+    queue = Queue(maxsize=args.queue_size)
+    idle_event = threading.Event()
+    writer = threading.Thread(
+        target=writer_loop,
+        args=(queue, args.db_batch, 2.0, idle_event, bar),
+        daemon=True)
+    writer.start()
+
+    logger.info(BANNER)
+    logger.info(f'[阶段2 实时同步] 开始：低资源后台增量同步 '
+                f'| 并发 {args.rt_workers} | 每合约最多 {args.max_pages} 页/轮')
+    logger.info(BANNER)
+
+    t_start = time.time()
+    total_rows = 0
+    rounds = 0
+    errors_total = 0
+    cycle = bar_to_seconds(bar)
+    stop_time = t_start + args.hours * 3600 if args.hours > 0 else None
+    next_contract_sync = 0
+    contracts_list = list(contracts)
+
+    while not _shutdown:
+        if stop_time is not None and time.time() >= stop_time:
+            logger.info(f'[阶段2 实时同步] 运行时长已达 {args.hours:g} 小时，正常结束')
+            break
+
+        # 定时重同步合约列表，自动纳入新币
+        if time.time() >= next_contract_sync:
+            try:
+                contracts_list = get_swap_contracts(client) \
+                    if not args.insts else contracts_list
+                next_contract_sync = time.time() + args.contracts_sync_interval
+                logger.info(f'[阶段2 实时同步] 已重同步合约列表，'
+                            f'当前 {len(contracts_list)} 个')
+            except Exception as e:
+                logger.warning(f'[阶段2 实时同步] 合约列表重同步失败: {e}')
+
+        t_round = time.time()
+        latest_map = get_latest_ts_map(bar)
+        fetched, errors = sync_round(
+            client, contracts_list, latest_map, queue, args.rt_workers,
+            bar, args.max_pages)
+        # 等待写库线程把本轮数据全部落库，保证下一轮能看到最新水位
+        idle_event.clear()
+        queue.join()
+        idle_event.wait(timeout=5.0)
+        rounds += 1
+        errors_total += errors
+        total_rows += fetched
+        dt_round = time.time() - t_round
+
+        logger.info(
+            f'[阶段2 实时同步] 第{rounds}轮 | 抓到 {fetched} 根 | 失败 {errors} | '
+            f'累计 {total_rows:,} 根 | 本轮耗时 {dt_round:.1f}s | '
+            f'已运行 {(time.time() - t_start) / 3600:.2f}h')
+
+        if _shutdown:
+            break
+
+        # 调度：追平则睡到下一根K线收盘后再同步（省CPU）；
+        # 落后(取到数据且本轮接近/超过一个周期)则呼吸1秒继续拉取（保速度）
+        if fetched == 0 or dt_round < cycle * 0.8:
+            next_run = (int(time.time()) // cycle + 1) * cycle + args.round_delay
+            sleep_until = max(0.5, next_run - time.time())
+        else:
+            sleep_until = 1.0
+        # 不超过预算截止点，到点立即退出
+        if stop_time is not None:
+            sleep_until = max(0.0, min(sleep_until, stop_time - time.time()))
+        sleep_interruptible(sleep_until)
+
+    # 冲刷剩余数据并退出写库线程
+    queue.put(STOP)
+    queue.join()
+    writer.join(timeout=15)
+    logger.info('-' * 60)
+    logger.info(f'[阶段2 实时同步] 结束: 运行 {rounds} 轮 | 共抓取 {total_rows:,} 根 '
+                f'| 失败 {errors_total} 次')
+
+
 # ----------------------------------------------------------------------
-# 主循环
+# 主流程
 # ----------------------------------------------------------------------
 def main():
     args = parse_args()
@@ -325,92 +540,44 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
 
     client = None
-    queue = None
-    writer = None
     try:
         init_db()
         pool = build_proxy_pool(args)
         client = OKXClient(proxy_pool=pool)
+        candle_dl = CandleDownloader(client, cfg)
 
-        # 并发默认值：代理池下每IP 2个并发，直连8个
+        # 阶段1并发默认值：代理池下每IP 2个并发(上限64)，直连16
         if args.workers is None:
-            args.workers = max(2, min(2 * len(pool), 32)) if pool else 8
+            args.workers = max(4, min(2 * len(pool), 64)) if pool else 16
 
         contracts = ([{'instId': i.strip()} for i in args.insts.split(',') if i.strip()]
                      if args.insts else get_swap_contracts(client))
         if not contracts:
             logger.error('没有可同步的合约')
             return
+
         # 初始化水位线（逐合约MAX(ts)，避免全表扫描）
         ensure_sync_state(args.bar, [c['instId'] for c in contracts])
 
-        queue = Queue(maxsize=args.queue_size)
-        idle_event = threading.Event()
-        writer = threading.Thread(
-            target=writer_loop,
-            args=(queue, args.db_batch, 2.0, idle_event, args.bar),
-            daemon=True)
-        writer.start()
-
-        hours_desc = f'{args.hours:g}小时' if args.hours > 0 else '无限'
-        t_start = time.time()
-        logger.info('=' * 60)
-        logger.info(f'连续同步下载启动 | {args.bar} | 时长 {hours_desc} | '
-                    f'合约 {len(contracts)} | 并发 {args.workers}')
+        logger.info(BANNER)
+        logger.info('OKX 连续同步下载启动（先追赶后实时，两阶段）')
+        logger.info(f'K线粒度 {args.bar} | 合约 {len(contracts)} | '
+                    f'阶段1并发 {args.workers} | 阶段2并发 {args.rt_workers}')
         if pool is not None:
             logger.info(f'代理池模式: {pool.stats()}')
-        logger.info(f'每轮每合约最多 {args.max_pages} 页 | 写库批量 {args.db_batch}')
-        logger.info('=' * 60)
+        logger.info(BANNER)
 
-        total_rows = 0
-        rounds = 0
-        errors_total = 0
-        cycle = bar_to_seconds(args.bar)
-        stop_time = t_start + args.hours * 3600 if args.hours > 0 else None
+        # ===== 阶段1：全量同步（追赶），不限制系统资源 =====
+        if args.skip_catchup:
+            logger.info('[阶段1 全量同步] 已通过 --skip-catchup 跳过，直接进入阶段2')
+        else:
+            run_phase1(candle_dl, contracts, args.bar, args)
 
-        while not _shutdown:
-            if stop_time is not None and time.time() >= stop_time:
-                logger.info(f'运行时长已达 {args.hours:g} 小时，正常结束')
-                break
-
-            t_round = time.time()
-            latest_map = get_latest_ts_map(args.bar)
-            fetched, errors = sync_round(
-                client, contracts, latest_map, queue, args.workers,
-                args.bar, args.max_pages)
-            # 等待写库线程把本轮数据全部落库，保证下一轮能看到最新水位
-            # （join 只等消费完成，此处再等批次落库，避免下一轮重复拉取）
-            idle_event.clear()
-            queue.join()
-            idle_event.wait(timeout=5.0)
-            rounds += 1
-            errors_total += errors
-            total_rows += fetched
-            dt_round = time.time() - t_round
-
-            logger.info(
-                f'[第{rounds}轮] 抓到 {fetched} 根 | 失败 {errors} | '
-                f'累计 {total_rows} 根 | 本轮耗时 {dt_round:.1f}s | '
-                f'已运行 {(time.time() - t_start) / 3600:.2f}h')
-
-            if _shutdown:
-                break
-
-            # 调度：追平则睡到下一根K线收盘后再同步（省CPU）；
-            # 落后(取到数据且本轮接近/超过一个周期)则呼吸1秒继续拉取（保速度）
-            if fetched == 0 or dt_round < cycle * 0.8:
-                next_run = (int(time.time()) // cycle + 1) * cycle + args.round_delay
-                sleep_until = max(0.5, next_run - time.time())
-            else:
-                sleep_until = 1.0
-            # 不超过预算截止点，到点立即退出
-            if stop_time is not None:
-                sleep_until = max(0.0, min(sleep_until, stop_time - time.time()))
-            sleep_interruptible(sleep_until)
-
-        logger.info('-' * 60)
-        logger.info(f'同步结束: 运行 {rounds} 轮 | 共抓取 {total_rows} 根 | '
-                    f'失败 {errors_total} 次')
+        # ===== 阶段2：实时同步（低资源后台） =====
+        if _shutdown:
+            logger.info('收到退出信号，跳过阶段2')
+        else:
+            run_phase2(client, contracts, args.bar, args)
 
     except KeyboardInterrupt:
         logger.warning('用户中断')
@@ -418,14 +585,6 @@ def main():
         logger.exception(f'程序异常: {e}')
         sys.exit(1)
     finally:
-        # 冲刷剩余数据并退出写库线程
-        if queue is not None and writer is not None:
-            try:
-                queue.put(STOP)
-                queue.join()
-                writer.join(timeout=15)
-            except Exception:
-                pass
         if client:
             client.close()
         dispose_engine()
