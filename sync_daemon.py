@@ -37,8 +37,10 @@ from app.config import Config
 from app.utils.logger import setup_logging, get_logger
 from app.database import init_db, dispose_engine, get_engine
 from app.okx_client import OKXClient
+from app.proxy_pool import build_proxy_pool
 from app.models import Candle, FundingRate
 from app.utils.time_utils import ms_to_datetime, bar_to_seconds
+from app.utils.okx_utils import get_swap_contracts
 
 logger = get_logger(__name__)
 
@@ -68,21 +70,89 @@ def parse_args():
                    help='K线收盘后额外等待秒数，默认10（避免拉到未完结K线）')
     p.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                    default=None, help='日志级别')
+    # 代理池参数（与 download_all / sync_continuous 保持一致）
+    p.add_argument('--proxy-pool', action='store_true',
+                   help='启用IP代理池（需配置OKX_PROXY_URLS，每币一个IP）')
+    p.add_argument('--proxy-verify', action='store_true',
+                   help='启动时探测代理池各代理出口IP并统计独立IP数')
+    p.add_argument('--per-ip-rate', type=int, default=None,
+                   help='每个IP的请求限速（默认读配置OKX_IP_RATE_LIMIT_PER_SECOND）')
+    p.add_argument('--dynamic', action='store_true',
+                   help='动态IP池：每次下载前自动发现节点/测IP/应用listeners，'
+                        '兼容节点与IP变化的VPN服务商（需Clash/Mihomo运行中）')
+    p.add_argument('--pool-size', type=int, default=16,
+                   help='动态IP池的独立IP数量上限，默认16')
+    p.add_argument('--pool-ttl', type=int, default=0,
+                   help='复用节点IP缓存秒数，0=每次重测（默认）')
+    p.add_argument('--pool-base-port', type=int, default=7891,
+                   help='动态IP池监听起始端口，默认7891')
+    p.add_argument('--no-prompt', action='store_true',
+                   help='动态模式等待端口就绪超时后不交互提示，直接报错')
     return p.parse_args()
 
 
 # ======================================================================
 # 合约列表
 # ======================================================================
-def get_swap_contracts(client):
-    """返回带 listTime 的 USDT 永续合约列表（仅 state=live）"""
-    data = client.get_instruments('SWAP')
-    contracts = []
-    for d in data:
-        if d.get('settleCcy') == 'USDT' and d.get('state') == 'live':
-            contracts.append({'instId': d['instId'], 'listTime': d.get('listTime')})
-    contracts.sort(key=lambda x: x['instId'])
-    return contracts
+def ensure_sync_state(bar, inst_ids):
+    """初始化 sync_state 水位线表（每合约最新时间戳）
+
+    为缺少水位线的合约补一次 MAX(ts)。注意不能写全表聚合；
+    逐合约查询走 (inst_id, bar, ts) 主键反向索引，O(1) 恒定快速。
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS sync_state ("
+            "inst_id VARCHAR(50) NOT NULL,"
+            "bar VARCHAR(10) NOT NULL,"
+            "latest_ts TIMESTAMPTZ,"
+            "updated_at TIMESTAMPTZ DEFAULT now(),"
+            "PRIMARY KEY (inst_id, bar))"))
+        existing = {r[0] for r in conn.execute(
+            text("SELECT inst_id FROM sync_state WHERE bar = :b"),
+            {"b": bar}).all()}
+        for inst in inst_ids:
+            if inst in existing:
+                continue
+            m = conn.execute(
+                text("SELECT MAX(ts) FROM candles "
+                     "WHERE inst_id = :i AND bar = :b"),
+                {"i": inst, "b": bar}).scalar()
+            if m is not None:
+                conn.execute(text(
+                    "INSERT INTO sync_state (inst_id, bar, latest_ts, updated_at) "
+                    "VALUES (:i, :b, :t, now()) ON CONFLICT DO NOTHING"),
+                    {"i": inst, "b": bar, "t": m})
+        conn.commit()
+
+
+def get_latest_ts_map(bar):
+    """读取 sync_state 水位线: {inst_id: latest_ts}（小表，恒定快速）"""
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT inst_id, latest_ts FROM sync_state WHERE bar = :b"),
+            {"b": bar}).mappings().all()
+    return {r["inst_id"]: r["latest_ts"] for r in rows if r["latest_ts"] is not None}
+
+
+def refresh_watermark(inst, bar):
+    """把某合约在库内的 MAX(ts) 回写 sync_state（逐合约走索引）"""
+    engine = get_engine()
+    with engine.connect() as conn:
+        m = conn.execute(
+            text("SELECT MAX(ts) FROM candles WHERE inst_id = :i AND bar = :b"),
+            {"i": inst, "b": bar}).scalar()
+        if m is not None:
+            conn.execute(text(
+                "INSERT INTO sync_state (inst_id, bar, latest_ts, updated_at) "
+                "VALUES (:i, :b, :t, now()) "
+                "ON CONFLICT (inst_id, bar) DO UPDATE SET "
+                "latest_ts = GREATEST(sync_state.latest_ts, EXCLUDED.latest_ts), "
+                "updated_at = now()"),
+                {"i": inst, "b": bar, "t": m})
+        conn.commit()
 
 
 # ======================================================================
@@ -166,6 +236,33 @@ def insert_candles_batch(rows):
     return written
 
 
+def _update_sync_state(rows, bar):
+    """根据刚写入的行批量更新 sync_state 水位线（小表）"""
+    if not rows:
+        return
+    inst_max = {}
+    for r in rows:
+        inst = r['inst_id']
+        ts = r['ts']
+        key = (inst, bar)
+        if key not in inst_max or ts > inst_max[key]:
+            inst_max[key] = ts
+    if not inst_max:
+        return
+    engine = get_engine()
+    values = []
+    for (inst, b), ts in inst_max.items():
+        values.append({"i": inst, "b": b, "t": ts})
+    with engine.connect() as conn:
+        conn.execute(text(
+            "INSERT INTO sync_state (inst_id, bar, latest_ts, updated_at) "
+            "VALUES (:i, :b, :t, now()) "
+            "ON CONFLICT (inst_id, bar) DO UPDATE SET "
+            "latest_ts = GREATEST(sync_state.latest_ts, EXCLUDED.latest_ts), "
+            "updated_at = now()"), values)
+        conn.commit()
+
+
 def insert_funding_batch(rows):
     if not rows:
         return 0
@@ -184,22 +281,8 @@ def insert_funding_batch(rows):
 # ======================================================================
 # 查询库内最新时间
 # ======================================================================
-def get_latest_ts_map_candles(bar):
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT inst_id, MAX(ts) AS m FROM candles WHERE bar=:b "
-                 "GROUP BY inst_id"), {"b": bar}).mappings().all()
-    return {r["inst_id"]: r["m"] for r in rows if r["m"] is not None}
-
-
-def get_latest_ts_map_funding():
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT inst_id, MAX(ts) AS m FROM funding_rates "
-                 "GROUP BY inst_id")).mappings().all()
-    return {r["inst_id"]: r["m"] for r in rows if r["m"] is not None}
+# 注意：sync_daemon 已改用 sync_state 小表维护水位线，
+# 不再对 candles / funding_rates 大表做 GROUP BY MAX(ts) 全表聚合。
 
 
 # ======================================================================
@@ -230,9 +313,9 @@ def funding_worker(client, contract, latest_map, queue, max_pages):
 
 
 # ======================================================================
-# 消费者：独立批量写库线程
+# 消费者：独立批量写库线程（同时维护 sync_state 水位线）
 # ======================================================================
-def writer_loop(queue, db_batch=1500, flush_interval=2.0):
+def writer_loop(queue, db_batch=1500, flush_interval=2.0, kline_bar='1m'):
     batch_c = []
     batch_f = []
     last_flush_c = time.time()
@@ -248,9 +331,11 @@ def writer_loop(queue, db_batch=1500, flush_interval=2.0):
         if item is STOP_SIGNAL:
             if batch_c:
                 stats['candles'] += insert_candles_batch(batch_c)
+                _update_sync_state(batch_c, kline_bar)
                 batch_c.clear()
             if batch_f:
                 stats['funding'] += insert_funding_batch(batch_f)
+                _update_sync_state(batch_f, 'funding')
                 batch_f.clear()
             stats['flushes'] += 1
             queue.task_done()
@@ -267,10 +352,12 @@ def writer_loop(queue, db_batch=1500, flush_interval=2.0):
         # 刷库条件：攒够数量 或 超时
         if batch_c and (len(batch_c) >= db_batch or now - last_flush_c >= flush_interval):
             stats['candles'] += insert_candles_batch(batch_c)
+            _update_sync_state(batch_c, kline_bar)
             last_flush_c = now
             batch_c.clear()
         if batch_f and (len(batch_f) >= db_batch or now - last_flush_f >= flush_interval):
             stats['funding'] += insert_funding_batch(batch_f)
+            _update_sync_state(batch_f, 'funding')
             last_flush_f = now
             batch_f.clear()
 
@@ -279,8 +366,8 @@ def writer_loop(queue, db_batch=1500, flush_interval=2.0):
 # 跑一轮
 # ======================================================================
 def run_one_round(client, contracts, queue, args, do_kline, do_funding):
-    latest_c = get_latest_ts_map_candles(args.bar) if do_kline else {}
-    latest_f = get_latest_ts_map_funding() if do_funding else {}
+    latest_c = get_latest_ts_map(args.bar) if do_kline else {}
+    latest_f = get_latest_ts_map('funding') if do_funding else {}
 
     c_fetched = f_fetched = 0
     fail = 0
@@ -344,11 +431,13 @@ def main():
     writer_thread = None
     try:
         init_db()
-        client = OKXClient()
+        pool = build_proxy_pool(args)
+        client = OKXClient(proxy_pool=pool)
 
         write_queue = Queue(maxsize=2000)
         writer_thread = threading.Thread(
-            target=writer_loop, args=(write_queue,),
+            target=writer_loop,
+            args=(write_queue, 1500, 2.0, args.bar),
             daemon=True)
         writer_thread.start()
 
@@ -362,18 +451,27 @@ def main():
             logger.error('没有可同步的合约')
             return
 
+        # 初始化水位线，避免后续大表聚合
+        inst_ids = [c['instId'] for c in contracts]
+        if do_kline:
+            ensure_sync_state(args.bar, inst_ids)
+        if do_funding:
+            ensure_sync_state('funding', inst_ids)
+
         logger.info('=' * 60)
         logger.info(f'OKX 实时同步守护启动 | bar={args.bar} | '
                     f'K线={do_kline} 资金费率={do_funding} '
                     f'| 合约 {len(contracts)} | 并发 {args.workers}')
+        if pool is not None:
+            logger.info(f'代理池模式: {pool.stats()}')
         logger.info('每收一根K线后同步增量；合约列表每 %ds 重同步以发现新币'
                     % args.contracts_sync_interval)
         logger.info('=' * 60)
 
         next_contract_sync = 0
         while not _shutdown:
-            # 定时重同步合约列表（发现新币）
-            if time.time() >= next_contract_sync:
+            # 定时重同步合约列表（发现新币；--insts 模式下不覆盖用户指定列表）
+            if time.time() >= next_contract_sync and not args.insts:
                 contracts = get_swap_contracts(client)
                 next_contract_sync = time.time() + args.contracts_sync_interval
                 logger.info(f'已同步合约列表，当前 {len(contracts)} 个')

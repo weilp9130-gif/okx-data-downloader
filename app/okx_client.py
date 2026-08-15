@@ -17,6 +17,7 @@ GET /api/v5/market/candles  → data为二维数组
 import os
 import threading
 import time
+import weakref
 from typing import List, Optional
 
 import requests
@@ -52,12 +53,11 @@ class OKXClient:
     - 连接池支持多线程并发下载
     """
 
-    TIMEOUT = 15
-    MAX_RETRIES = 5
-
     def __init__(self, proxy_pool=None):
         self.cfg = Config().okx
         self.BASE_URL = self.cfg.base_url
+        self.TIMEOUT = int(getattr(self.cfg, "timeout", 15))
+        self.MAX_RETRIES = max(1, int(getattr(self.cfg, "max_retries", 5)))
 
         # IP代理池：不为空时使用"一个币一个IP"并行下载模式，
         # 每个代理拥有独立限速桶，绕过单IP限频瓶颈。
@@ -72,12 +72,16 @@ class OKXClient:
         self._rate = max(self.cfg.rate_limit_per_second, 1)
         self._tokens = float(self._rate)            # 当前可用令牌
         self._last_refill = time.monotonic()        # 上次补充令牌时间
-        self._max_rate = self._rate                 # 初始最大速率
+        self._normal_rate = self._rate              # 配置的正常速率
         self._cool_until = 0.0                      # 429冷却截止时间
+        self._recover_at = 0.0                      # 速率恢复时间
 
         # 复用连接的 Session（keep-alive）+ 连接池，支持多线程并发下载
         # 每个线程独立 Session（thread-local），避免多线程共享 session 竞争
         self._tl = threading.local()
+        # 跟踪所有线程创建的 session，便于程序结束时统一关闭
+        self._sessions = set()  # type: ignore
+        self._sessions_lock = threading.Lock()
         if self.proxy_pool is not None:
             # 代理池模式下由池内逻辑负责重试/换IP/429冷却，
             # 底层不做自动重试，避免掩盖429导致IP无法及时冷却。
@@ -114,17 +118,21 @@ class OKXClient:
             s.mount("https://", self._adapter)
             s.mount("http://", self._adapter)
             self._tl.session = s
+            with self._sessions_lock:
+                self._sessions.add(s)
         return self._tl.session
 
     def close(self):
         """关闭所有线程创建的底层连接（程序结束时调用）"""
-        # 关闭当前线程的 session（其余线程 session 随线程结束被GC回收）
-        try:
-            s = getattr(self._tl, "session", None)
-            if s is not None:
+        # 关闭当前线程的 session（其余线程 session 也统一关闭）
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions.clear()
+        for s in sessions:
+            try:
                 s.close()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     def _resolve_proxy(self):
         """解析代理配置（预留功能）"""
@@ -142,10 +150,15 @@ class OKXClient:
         每秒最多发放 rate 个令牌，每个请求消耗1个令牌。
         令牌按速率持续补充，严格限制整体请求频率，
         避免触发 OKX 对 history-candles 的频控(429)。
+        429 降速后会在冷却结束后逐步恢复。
         """
         while True:
             now = time.monotonic()
             with self._rate_lock:
+                # 冷却结束后逐步恢复速率，避免一旦 429 就永久低速
+                if now >= self._recover_at and self._rate < self._normal_rate:
+                    self._rate = min(self._normal_rate, max(self._rate + 1, int(self._rate * 1.25)))
+                    self._recover_at = now + 5.0
                 self._tokens = min(
                     self._rate,
                     self._tokens + (now - self._last_refill) * self._rate,
@@ -167,6 +180,8 @@ class OKXClient:
             # 清空令牌，停止立即放行
             self._tokens = 0.0
             self._cool_until = time.monotonic() + 5.0
+            # 5 秒后尝试逐步恢复；如果仍被限则继续降速
+            self._recover_at = time.monotonic() + 5.0
 
     def _throttle_after_429(self) -> None:
         """429冷却等待：在冷却期内阻塞所有请求"""

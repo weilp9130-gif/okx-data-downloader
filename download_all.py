@@ -30,7 +30,8 @@ from datetime import datetime, timezone
 
 from app.config import Config
 from app.utils.logger import setup_logging, get_logger
-from app.utils.time_utils import parse_date as _parse_date, ms_to_datetime as _ms_to_datetime
+from app.utils.time_utils import parse_date as _parse_date
+from app.utils.okx_utils import ms_to_naive_utc, get_swap_contracts
 from app.database import init_db, dispose_engine
 from app.okx_client import OKXClient
 from app.proxy_pool import build_proxy_pool
@@ -55,14 +56,6 @@ def parse_date(s):
         return _parse_date(s)
     except ValueError:
         return None
-
-
-def ms_to_dt(ms):
-    """毫秒时间戳转naive UTC datetime（供 listTime 使用）"""
-    dt = _ms_to_datetime(ms)
-    if dt is None:
-        return None
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def parse_args():
@@ -94,17 +87,6 @@ def parse_args():
     p.add_argument('--no-prompt', action='store_true',
                    help='动态模式等待端口就绪超时后不交互提示，直接报错')
     return p.parse_args()
-
-
-def get_swap_contracts(client):
-    """返回带 listTime 的 USDT 永续合约列表（仅 state=live）"""
-    data = client.get_instruments('SWAP')
-    contracts = []
-    for d in data:
-        if d.get('settleCcy') == 'USDT' and d.get('state') == 'live':
-            contracts.append({'instId': d['instId'], 'listTime': d.get('listTime')})
-    contracts.sort(key=lambda x: x['instId'])
-    return contracts
 
 
 def main():
@@ -169,7 +151,7 @@ def main():
                 return (inst, 0, 'shutdown')
             c_start = None
             if list_time:
-                lt = ms_to_dt(int(list_time))
+                lt = ms_to_naive_utc(int(list_time))
                 if lt:
                     c_start = lt
             try:

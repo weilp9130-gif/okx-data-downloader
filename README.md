@@ -163,9 +163,6 @@ python download_all.py --workers 8 --bar 5m
 
 # 指定部分合约 + 起始时间
 python download_all.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP --start 2020-01-01
-
-# 更细的断点粒度（每 7 天一等分）
-python download_all.py --days-per-window 7
 ```
 
 ### 3.1 IP代理池：动态模式（推荐，兼容节点/IP变化的VPN）

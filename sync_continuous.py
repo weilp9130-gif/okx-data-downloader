@@ -47,6 +47,7 @@ from app.models import Candle
 from app.proxy_pool import build_proxy_pool
 from app.downloader.candles import CandleDownloader
 from app.utils.time_utils import ms_to_datetime, bar_to_seconds
+from app.utils.okx_utils import ms_to_naive_utc, get_swap_contracts
 
 logger = get_logger(__name__)
 
@@ -116,25 +117,6 @@ def parse_args():
 # ----------------------------------------------------------------------
 # 合约列表 / 水位线
 # ----------------------------------------------------------------------
-def get_swap_contracts(client):
-    """带 listTime 的 USDT 永续合约列表（仅 state=live）"""
-    data = client.get_instruments('SWAP')
-    contracts = []
-    for d in data:
-        if d.get('settleCcy') == 'USDT' and d.get('state') == 'live':
-            contracts.append({'instId': d['instId'], 'listTime': d.get('listTime')})
-    contracts.sort(key=lambda x: x['instId'])
-    return contracts
-
-
-def ms_to_dt(ms):
-    """毫秒时间戳 -> naive UTC datetime（供 listTime 使用）"""
-    dt = ms_to_datetime(ms)
-    if dt is None:
-        return None
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-
 def ensure_sync_state(bar, inst_ids):
     """初始化 sync_state 水位线表（每合约最新K线时间戳）
 
@@ -198,6 +180,27 @@ def refresh_watermark(inst, bar):
         conn.commit()
 
 
+def batch_refresh_watermark(inst_ids, bar):
+    """批量刷新一组合约的水位线（减少短连接）"""
+    if not inst_ids:
+        return
+    engine = get_engine()
+    with engine.connect() as conn:
+        for inst in inst_ids:
+            m = conn.execute(
+                text("SELECT MAX(ts) FROM candles WHERE inst_id = :i AND bar = :b"),
+                {"i": inst, "b": bar}).scalar()
+            if m is not None:
+                conn.execute(text(
+                    "INSERT INTO sync_state (inst_id, bar, latest_ts, updated_at) "
+                    "VALUES (:i, :b, :t, now()) "
+                    "ON CONFLICT (inst_id, bar) DO UPDATE SET "
+                    "latest_ts = GREATEST(sync_state.latest_ts, EXCLUDED.latest_ts), "
+                    "updated_at = now()"),
+                    {"i": inst, "b": bar, "t": m})
+        conn.commit()
+
+
 def catchup_lag_minutes(bar, contracts):
     """所有已同步合约中最落后的分钟数（无水位的合约不参与判定）"""
     latest = get_latest_ts_map(bar)
@@ -216,7 +219,7 @@ def catchup_lag_minutes(bar, contracts):
 def _catchup_contract(candle_dl, inst, bar, end_dt, list_time_ms):
     try:
         # listTime 来自 OKX 接口为字符串，需转 int（ms_to_datetime 内部有 / 1000）
-        start = ms_to_dt(int(list_time_ms)) if list_time_ms else None
+        start = ms_to_naive_utc(int(list_time_ms)) if list_time_ms else None
         n = candle_dl.download_range(
             inst, bar, start=start, end=end_dt, list_time=start)
         return inst, n, None
@@ -225,11 +228,12 @@ def _catchup_contract(candle_dl, inst, bar, end_dt, list_time_ms):
 
 
 def catch_up_pass(candle_dl, contracts, bar, end_dt, workers):
-    """一轮全量追赶：所有合约并行补齐到 end_dt，并刷新水位线"""
+    """一轮全量追赶：所有合约并行补齐到 end_dt，返回成功合约列表"""
     done = ok = fail = 0
     total = 0
     t0 = time.time()
     last_log = time.time()
+    success_insts = []
 
     def work(c):
         inst, n, err = _catchup_contract(
@@ -247,7 +251,7 @@ def catch_up_pass(candle_dl, contracts, bar, end_dt, workers):
             else:
                 ok += 1
                 total += n
-                refresh_watermark(inst, bar)
+                success_insts.append(inst)
             now = time.time()
             if (done % 20 == 0 or done == len(contracts)
                     or now - last_log >= 30):
@@ -257,6 +261,8 @@ def catch_up_pass(candle_dl, contracts, bar, end_dt, workers):
                     f'(成功{ok} 失败{fail}) | 累计写入 {total:,} 根 | '
                     f'速率 {rate:,.0f} 根/秒 | 已用 {(now - t0) / 60:.1f} 分')
                 last_log = now
+    # 本轮所有成功合约统一批量刷新水位线，避免逐合约短连接
+    batch_refresh_watermark(success_insts, bar)
     return total, fail
 
 

@@ -237,10 +237,17 @@ class ProxyPool:
                             raise RuntimeError(
                                 "代理池长时间无可用IP，请检查代理是否全部失效"
                             )
-                        time.sleep(ACQUIRE_NONE_SLEEP)
-                        continue
-                    if key is not None:
-                        self._assigned[key] = proxy
+                        # 无可用代理时必须在锁外等待，否则阻塞其他线程
+                        need_wait = True
+                    else:
+                        need_wait = False
+                        if key is not None:
+                            self._assigned[key] = proxy
+                else:
+                    need_wait = False
+            if need_wait:
+                time.sleep(ACQUIRE_NONE_SLEEP)
+                continue
             proxy.buckets.wait()
             return proxy
 
