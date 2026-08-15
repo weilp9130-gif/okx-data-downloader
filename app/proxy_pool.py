@@ -370,7 +370,7 @@ def build_proxy_pool(args) -> Optional[ProxyPool]:
     main.py 与 download_all.py 共用本函数，避免两份逻辑漂移。
     """
     if args.dynamic:
-        from dynamic_pool import build_dynamic_pool
+        from .dynamic_pool import build_dynamic_pool
         logger.info("=" * 60)
         logger.info("动态IP代理池: 发现节点 → 测试IP → 应用listeners → 构建池")
         logger.info("=" * 60)
