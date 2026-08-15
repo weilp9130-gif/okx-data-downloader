@@ -571,9 +571,9 @@ def main():
         client = OKXClient(proxy_pool=pool)
         candle_dl = CandleDownloader(client, cfg)
 
-        # 阶段1并发默认值：代理池下每IP 4个并发(上限64)，避免高并发压垮DB
+        # 阶段1并发默认值：代理池下每IP 4个并发(上限128)，写库已改每批短连接不受DB池限制
         if args.workers is None:
-            args.workers = max(4, min(4 * len(pool), 64)) if pool else 16
+            args.workers = max(4, min(4 * len(pool), 128)) if pool else 16
 
         contracts = ([{'instId': i.strip()} for i in args.insts.split(',') if i.strip()]
                      if args.insts else get_swap_contracts(client))

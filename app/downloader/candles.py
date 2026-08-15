@@ -8,6 +8,7 @@
 
 from typing import List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
+import threading
 import time
 
 from sqlalchemy import text
@@ -27,12 +28,22 @@ from ..utils.time_utils import (
 logger = get_logger(__name__)
 
 
+def _limit_db_write(func):
+    """限制同时向 PostgreSQL 写入的线程数，避免高并发压垮数据库"""
+    def wrapper(self, *args, **kwargs):
+        with self.DB_WRITE_SEMAPHORE:
+            return func(self, *args, **kwargs)
+    return wrapper
+
+
 class CandleDownloader:
-    """K线下载器"""
+    """K
+
+    # 并发写库控制：限制同时向 PostgreSQL 写入的线程数，避免压垮数据库
+    DB_WRITE_SEMAPHORE = threading.Semaphore(8)线下载器"""
 
     # TimescaleDB单表建议批量插入条数
-    # 降低为250，减少高并发写入时单事务内存占用和锁竞争
-    BULK_SIZE = 250
+    BULK_SIZE = 500
 
     # 一天的毫秒数（窗口校验按UTC天粒度）
     DAY_MS = 86_400_000
@@ -365,6 +376,7 @@ class CandleDownloader:
             )
         return total_written, had_data
 
+    @_limit_db_write
     def _save_candles(
         self,
         inst_id: str,
