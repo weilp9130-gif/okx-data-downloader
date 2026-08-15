@@ -20,6 +20,8 @@
 okx_data_downloader
 ├── main.py           # 程序入口（命令行CLI）
 ├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗，支持IP代理池）
+├── sync_continuous.py# ★连续同步下载脚本（24小时默认，低内存/低CPU，保持最新）
+├── sync_daemon.py    # 常驻实时同步守护（K线+资金费率，按K线周期对齐）
 ├── config.py         # 配置模块（dataclass + .env）
 ├── database.py       # 数据库连接（SQLAlchemy Engine/Session）
 ├── db_docker.py      # Docker数据库引导（下载前自动检测/启动timescale容器）
@@ -207,14 +209,43 @@ OKX_IP_RATE_LIMIT_PER_SECOND=8
 python download_all.py --proxy-pool --proxy-verify --workers 16
 ```
 
-### 4. 下载资金费率
+### 4. 连续同步下载（24小时保持最新，低资源占用）
+
+`sync_continuous.py` 启动后持续下载最新K线数据，**默认24小时后自动退出**，
+兼顾"下载速度"与"内存/CPU占用"：
+
+- **内存低**：有界队列 + 独立批量写库线程，每轮只取增量（默认每合约最多10页），
+  不缓存全量数据；
+- **CPU低**：追平时按K线周期对齐休眠（1m粒度每轮仅~3秒下载 + 其余时间空闲），
+  会话复用(keep-alive)避免重复TLS握手，按轮汇总日志；
+- **速度快**：多合约并行 + 可选IP代理池每IP平滑限速（实测8 IP ≈ 50+ pages/s，
+  几乎无429）；
+- **断点续传**：`sync_state` 水位线表记录每合约最新时间戳（逐合约走主键索引
+  初始化，避免全表扫描），重启后从断点继续，不重复下载。
+
+```bash
+# 默认：全部USDT永续 1m K线，同步24小时后自动退出
+python sync_continuous.py
+
+# 无限运行 / 自定义时长与粒度
+python sync_continuous.py --hours 0
+python sync_continuous.py --bar 5m --hours 12
+
+# 指定部分合约
+python sync_continuous.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
+
+# 配合IP代理池提速（--workers 自动=IP数×2）
+python sync_continuous.py --dynamic --pool-size 16
+```
+
+### 5. 下载资金费率
 
 ```bash
 # 只下载资金费率（仅合约产品）
 python main.py --type funding --inst ETH-USDT-SWAP
 ```
 
-### 4. 编程式使用
+### 6. 编程式使用
 
 参考 `run_example.py`：
 
@@ -259,7 +290,16 @@ dl.download_range(
 | `realized_rate` | NUMERIC | 已实现费率 |
 | `funding_time` | TIMESTAMPTZ | 结算时间 |
 
-两张表均会通过 `init_db()` 自动转换为 **TimescaleDB hypertable**，按 `ts` 分区，提升时序查询性能。
+### `sync_state` (同步水位线，sync_continuous 自动维护)
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `inst_id` | VARCHAR(50) | 合约ID（PK） |
+| `bar` | VARCHAR(10) | K线粒度（PK） |
+| `latest_ts` | TIMESTAMPTZ | 该合约已同步到的最新K线时间 |
+| `updated_at` | TIMESTAMPTZ | 更新时间 |
+
+`candles` 与 `funding_rates` 均会通过 `init_db()` 自动转换为 **TimescaleDB hypertable**，按 `ts` 分区，提升时序查询性能；`sync_state` 为小表（每合约一行），由 `sync_continuous.py` 自动创建维护。
 
 ## TimescaleDB 优势
 
