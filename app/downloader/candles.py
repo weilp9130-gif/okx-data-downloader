@@ -31,7 +31,8 @@ class CandleDownloader:
     """K线下载器"""
 
     # TimescaleDB单表建议批量插入条数
-    BULK_SIZE = 500
+    # 降低为250，减少高并发写入时单事务内存占用和锁竞争
+    BULK_SIZE = 250
 
     # 一天的毫秒数（窗口校验按UTC天粒度）
     DAY_MS = 86_400_000

@@ -88,12 +88,17 @@ def _start_container(cfg) -> None:
     cmd = [
         "docker", "run", "-d", "--name", name,
         "--restart", "unless-stopped",
+        "--shm-size", "2g",
         "-e", f"POSTGRES_USER={cfg.user}",
         "-e", f"POSTGRES_PASSWORD={cfg.password}",
         "-e", f"POSTGRES_DB={cfg.name}",
         "-p", f"127.0.0.1:{cfg.port}:5432",
         "-v", f"{cfg.data_volume}:/var/lib/postgresql/data",
         cfg.image,
+        "postgres",
+        "-c", "max_connections=200",
+        "-c", "work_mem=4MB",
+        "-c", "max_wal_size=2GB",
     ]
     # 首次运行需拉取镜像，放宽超时到10分钟
     rc, out, err = _run(cmd, timeout=600)
