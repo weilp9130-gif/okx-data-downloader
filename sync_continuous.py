@@ -19,12 +19,12 @@
 资源策略：阶段1宽松（快），阶段2受限（省），两阶段都遵守OKX每IP平滑限速
 （复用 proxy_pool，避免429风暴——这是API约束而非本机资源限制）。
 
-用法：
-    python sync_continuous.py                              # 默认一直运行
-    python sync_continuous.py --hours 12                   # 运行12小时后退出
-    python sync_continuous.py --skip-catchup               # 跳过追赶，直接实时同步
-    python sync_continuous.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
-    python sync_continuous.py --dynamic --pool-size 16     # 配合IP代理池提速
+唯一运行方式（本项目只保留这一种下载模式），等价于默认参数直接运行：
+    python sync_continuous.py
+默认行为：
+    - 阶段1全量同步：用最快速度追赶（代理池32IP + 高并发 + COPY写库缓冲）。
+    - 阶段2实时同步：低资源后台持续增量下载，默认无限运行（--hours 0）。
+    - 默认 --pool-ttl 86400（复用24小时节点缓存）、--log-level INFO、--no-prompt。
 """
 
 import argparse
@@ -93,7 +93,7 @@ def parse_args():
                    help='阶段2写库批量条数，默认1000')
     p.add_argument('--log-level',
                    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                   default=None, help='日志级别')
+                   default='INFO', help='日志级别，默认INFO')
     # 代理池参数（与 download_all 保持一致）
     p.add_argument('--proxy-pool', action='store_true',
                    help='启用IP代理池（需配置OKX_PROXY_URLS，每币一个IP）')
@@ -102,17 +102,15 @@ def parse_args():
     p.add_argument('--per-ip-rate', type=int, default=None,
                    help='每个IP的请求限速（默认读配置OKX_IP_RATE_LIMIT_PER_SECOND）')
     p.add_argument('--dynamic', action='store_true', default=True,
-                   help='动态IP池：每次下载前自动发现节点/测IP/应用listeners（默认开启）')
-    p.add_argument('--no-dynamic', dest='dynamic', action='store_false',
-                   help='禁用动态IP代理池，使用直连模式')
+                   help='动态IP池：每次下载前自动发现节点/测IP/应用listeners（固定开启）')
     p.add_argument('--pool-size', type=int, default=32,
                    help='动态IP池的独立IP数量上限，默认32')
-    p.add_argument('--pool-ttl', type=int, default=3600,
-                   help='复用节点IP缓存秒数，默认3600秒（1小时），0=每次重测')
+    p.add_argument('--pool-ttl', type=int, default=86400,
+                   help='复用节点IP缓存秒数，默认86400秒（24小时），0=每次重测')
     p.add_argument('--pool-base-port', type=int, default=7891,
                    help='动态IP池监听起始端口，默认7891')
-    p.add_argument('--no-prompt', action='store_true',
-                   help='动态模式等待端口就绪超时后不交互提示，直接报错')
+    p.add_argument('--no-prompt', action='store_true', default=True,
+                   help='动态模式等待端口就绪超时后不交互提示，直接报错（默认开启）')
     return p.parse_args()
 
 
