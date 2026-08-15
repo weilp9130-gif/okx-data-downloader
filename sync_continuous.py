@@ -531,7 +531,8 @@ def main():
     args = parse_args()
     cfg = Config()
 
-    setup_logging(level=args.log_level or cfg.logging.level,
+    setup_logging(name="sync_continuous",
+                  level=args.log_level or cfg.logging.level,
                   file_enabled=cfg.logging.file_enabled,
                   max_bytes=cfg.logging.max_bytes,
                   backup_count=cfg.logging.backup_count)

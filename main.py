@@ -77,6 +77,7 @@ def main() -> None:
 
     # 初始化日志
     setup_logging(
+        name="main",
         level=args.log_level or config.logging.level,
         file_enabled=config.logging.file_enabled,
         max_bytes=config.logging.max_bytes,

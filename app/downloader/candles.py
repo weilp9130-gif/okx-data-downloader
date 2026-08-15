@@ -8,6 +8,7 @@
 
 from typing import List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
+import time
 
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -309,6 +310,7 @@ class CandleDownloader:
         total_written = 0
         had_data = False
         page = 0
+        last_progress_log = time.monotonic()
 
         engine = get_engine()
         with engine.connect() as conn:
@@ -335,7 +337,10 @@ class CandleDownloader:
                     if start_ms <= ts_ms <= end_ms:
                         collected.append(c)
 
-                if page % 50 == 0:
+                # 每30秒打一条进度，避免大合约(数万页)刷屏
+                now = time.monotonic()
+                if now - last_progress_log >= 30:
+                    last_progress_log = now
                     logger.info(
                         f"[进度] {inst_id} | {bar} | 回溯至 "
                         f"{ms_to_datetime(oldest_ts):%Y-%m-%d %H:%M} | 页 {page}"

@@ -290,6 +290,36 @@ dispose_engine()
 python -m unittest discover -s tests -v
 ```
 
+## 日志规范
+
+所有脚本统一日志规则（`app/utils/logger.py`）。
+
+**格式**：`{时间} {级别} | {组件} | {消息}`
+
+```
+2026-08-15 14:24:31 INFO  | sync_continuous | [阶段2 实时同步] 第1轮 | 抓到 3 根 | 失败 0 | 耗时 2.9s
+14:24:31 INFO  | downloader.candles | [进度] AVAX-USDT-SWAP | 1m | 回溯至 2023-04-25 05:20 | 页 400
+```
+
+- 组件名 = 模块名去掉 `app.` 前缀（`app.downloader.candles` → `downloader.candles`）；入口脚本用脚本名（`main`/`download_all`/`sync_continuous`/`sync_daemon`）
+- 控制台简洁（无日期），日志文件完整（带日期毫秒）
+
+**级别规则**
+
+| 级别 | 用途 |
+|------|------|
+| `DEBUG` | 底层细节（单请求/响应、SQL、调试信息） |
+| `INFO` | 正常进度（任务开始/完成、阶段切换、轮次汇总、定期进度） |
+| `WARNING` | 可恢复的瞬时问题（单次重试、换代理、单合约失败、单次429） |
+| `ERROR` | 持久失败、异常导致功能中断 |
+
+**文件规则**
+
+- 每个入口脚本独立日志文件：`logs/{脚本名}_{日期}.log`，避免多进程互相穿插
+- 单文件最大 10MB，轮转保留 5 个备份；UTF-8 编码
+- 进度日志按时间间隔输出（大合约回溯每 30 秒一条，不刷屏）
+- 第三方库降噪：`urllib3=ERROR`、`sqlalchemy=WARNING`
+
 ## 数据库表结构
 
 ### `candles` (K线)
