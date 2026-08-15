@@ -78,6 +78,24 @@ class DatabaseConfig:
         default_factory=lambda: int(os.getenv("DB_POOL_TIMEOUT", "30"))
     )
 
+    # ============ Docker数据库引导（下载前自动检测并启动） ============
+    # DB_USE_DOCKER: auto=数据库不可达时自动用Docker启动(默认)，true=同上，
+    #                false=绝不动Docker(数据库不可达时直接报错)
+    use_docker: str = field(
+        default_factory=lambda: os.getenv("DB_USE_DOCKER", "auto")
+    )
+    # 容器名 / 镜像 / 数据卷（首次运行会创建并持久化数据到命名卷）
+    container_name: str = field(
+        default_factory=lambda: os.getenv("DB_CONTAINER_NAME", "okx-timescaledb")
+    )
+    image: str = field(
+        default_factory=lambda: os.getenv(
+            "DB_DOCKER_IMAGE", "timescale/timescaledb:latest-pg16")
+    )
+    data_volume: str = field(
+        default_factory=lambda: os.getenv("DB_DOCKER_VOLUME", "okx-timescaledb-data")
+    )
+
     @property
     def dsn(self) -> str:
         """返回SQLAlchemy连接字符串"""

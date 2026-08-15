@@ -35,6 +35,10 @@ def get_engine() -> Engine:
     """
     global _engine
     if _engine is None:
+        # 下载前确保数据库可用：已有数据库直连；不可达且允许时自动用Docker启动
+        from db_docker import ensure_database
+        ensure_database()
+
         cfg = Config().database
         logger.info(f"连接数据库: {cfg.host}:{cfg.port}/{cfg.name}")
 

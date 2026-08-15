@@ -22,6 +22,7 @@ okx_data_downloader
 ├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗，支持IP代理池）
 ├── config.py         # 配置模块（dataclass + .env）
 ├── database.py       # 数据库连接（SQLAlchemy Engine/Session）
+├── db_docker.py      # Docker数据库引导（下载前自动检测/启动timescale容器）
 ├── models.py         # ORM数据模型
 ├── okx_client.py     # OKX API客户端（限速/重试/线程本地Session/代理池）
 ├── proxy_pool.py     # IP代理池（每IP独立限速/健康管理/IP去重探测）
@@ -76,8 +77,37 @@ cp env.template .env      # Windows: copy env.template .env
 | `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` | OKX API密钥（行情接口可留空） |
 | `OKX_SANDBOX` | `true`=模拟盘, `false`=实盘 |
 | `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | PostgreSQL连接信息 |
+| `DB_USE_DOCKER` | `auto`=数据库不可达时自动用Docker启动(默认)，`false`=绝不动Docker |
+| `DB_CONTAINER_NAME` / `DB_DOCKER_IMAGE` / `DB_DOCKER_VOLUME` | Docker数据库容器名/镜像/数据卷 |
 | `LOG_LEVEL` | 日志级别 |
 | `DEFAULT_INSTRUMENT` | 默认交易对 |
+
+## Docker 数据库自动启动
+
+运行任何下载/同步脚本前，程序会自动确保数据库可用（`db_docker.py`，挂在 `database.get_engine()` 内，所有入口自动生效）：
+
+1. **数据库已可连接**（`DB_HOST:DB_PORT` 端口可达）→ 直接用现有数据库，不打扰；
+2. **数据库不可达** 且本机有 Docker（`DB_USE_DOCKER` 非 `false`）→ 自动检测 Docker，
+   创建或启动 `timescale/timescaledb` 容器（容器不存在则自动创建并持久化到命名卷，
+   已停止则自动 `docker start`），等待就绪后继续下载；
+3. **Docker 也不可用** 或 `DB_USE_DOCKER=false` → 抛出明确错误，提示如何修复。
+
+```bash
+# 场景1：本机已有 PostgreSQL，直接连接（默认行为，无需改动）
+python download_all.py --dynamic --pool-size 16
+
+# 场景2：本机没有数据库，但有 Docker Desktop —— 自动启动 timescale 容器
+python download_all.py --dynamic --pool-size 16
+
+# 场景3：手动管理容器（可选）
+docker run -d --name okx-timescaledb --restart unless-stopped \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=okx_data \
+  -p 127.0.0.1:5432:5432 -v okx-timescaledb-data:/var/lib/postgresql/data \
+  timescale/timescaledb:latest-pg16
+```
+
+> 说明：只有 `DB_HOST` 为本机地址（localhost/127.0.0.1）时才允许自动启动 Docker；
+> 远程数据库不可达时会直接报错。容器首次创建需拉取镜像，建议提前 `docker pull`。
 
 ## 使用说明
 
