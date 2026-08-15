@@ -1,4 +1,4 @@
-"""K线数据下载模块
+﻿"""K线数据下载模块
 
 负责从OKX批量拉取指定交易对、指定时间粒度、指定时间范围的K线数据，
 并写入PostgreSQL/TimescaleDB。
@@ -8,7 +8,6 @@
 
 from typing import List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
-import threading
 import time
 
 from sqlalchemy import text
@@ -19,6 +18,7 @@ from ..database import get_engine
 from ..okx_client import OKXClient
 from ..config import Config
 from ..utils.logger import get_logger
+from .write_buffer import get_write_buffer
 from ..utils.time_utils import (
     ms_to_datetime,
     utc_ms_timestamp,
@@ -28,19 +28,8 @@ from ..utils.time_utils import (
 logger = get_logger(__name__)
 
 
-def _limit_db_write(func):
-    """限制同时向 PostgreSQL 写入的线程数，避免高并发压垮数据库"""
-    def wrapper(self, *args, **kwargs):
-        with self.DB_WRITE_SEMAPHORE:
-            return func(self, *args, **kwargs)
-    return wrapper
-
-
 class CandleDownloader:
-    """K
-
-    # 并发写库控制：限制同时向 PostgreSQL 写入的线程数，避免压垮数据库
-    DB_WRITE_SEMAPHORE = threading.Semaphore(8)线下载器"""
+    """K线下载器"""
 
     # TimescaleDB单表建议批量插入条数
     BULK_SIZE = 500
@@ -376,7 +365,6 @@ class CandleDownloader:
             )
         return total_written, had_data
 
-    @_limit_db_write
     def _save_candles(
         self,
         inst_id: str,
@@ -462,14 +450,8 @@ class CandleDownloader:
             conn.commit()
             return written
 
-        engine = get_engine()
-        with engine.connect() as conn:
-            for i in range(0, len(rows), self.BULK_SIZE):
-                batch = rows[i:i + self.BULK_SIZE]
-                result = conn.execute(stmt, batch)
-                written += result.rowcount or 0
-            conn.commit()
-        return written
+        # 通过写库缓冲限流写入，避免高并发压垮 PostgreSQL
+        return get_write_buffer().put(rows, overwrite=overwrite)
 
     def update_latest(self, inst_id: str, bar: str, lookback_days: int = 1) -> int:
         """增量更新最近N天的K线数据
