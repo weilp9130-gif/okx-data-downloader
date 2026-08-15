@@ -101,8 +101,10 @@ def parse_args():
                    help='启动时探测代理池各代理出口IP并统计独立IP数')
     p.add_argument('--per-ip-rate', type=int, default=None,
                    help='每个IP的请求限速（默认读配置OKX_IP_RATE_LIMIT_PER_SECOND）')
-    p.add_argument('--dynamic', action='store_true',
-                   help='动态IP池：每次下载前自动发现节点/测IP/应用listeners')
+    p.add_argument('--dynamic', action='store_true', default=True,
+                   help='动态IP池：每次下载前自动发现节点/测IP/应用listeners（默认开启）')
+    p.add_argument('--no-dynamic', dest='dynamic', action='store_false',
+                   help='禁用动态IP代理池，使用直连模式')
     p.add_argument('--pool-size', type=int, default=32,
                    help='动态IP池的独立IP数量上限，默认32')
     p.add_argument('--pool-ttl', type=int, default=0,
