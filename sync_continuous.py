@@ -107,8 +107,8 @@ def parse_args():
                    help='禁用动态IP代理池，使用直连模式')
     p.add_argument('--pool-size', type=int, default=32,
                    help='动态IP池的独立IP数量上限，默认32')
-    p.add_argument('--pool-ttl', type=int, default=0,
-                   help='复用节点IP缓存秒数，0=每次重测（默认）')
+    p.add_argument('--pool-ttl', type=int, default=3600,
+                   help='复用节点IP缓存秒数，默认3600秒（1小时），0=每次重测')
     p.add_argument('--pool-base-port', type=int, default=7891,
                    help='动态IP池监听起始端口，默认7891')
     p.add_argument('--no-prompt', action='store_true',
