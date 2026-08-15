@@ -32,6 +32,12 @@ class TestTimeUtils(unittest.TestCase):
         self.assertEqual(dt.tzinfo, timezone.utc)
         self.assertEqual(dt.year, 1970)
 
+    def test_ms_to_datetime_string_input(self):
+        """OKX listTime 等接口返回字符串毫秒时间戳，不应报 TypeError"""
+        dt = ms_to_datetime("1621091600000")
+        self.assertEqual(dt.year, 2021)
+        self.assertEqual(dt.tzinfo, timezone.utc)
+
     def test_parse_date(self):
         dt = parse_date("2024-01-15")
         self.assertEqual(dt.year, 2024)

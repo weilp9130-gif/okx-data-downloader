@@ -215,7 +215,8 @@ def catchup_lag_minutes(bar, contracts):
 # ----------------------------------------------------------------------
 def _catchup_contract(candle_dl, inst, bar, end_dt, list_time_ms):
     try:
-        start = ms_to_dt(list_time_ms) if list_time_ms else None
+        # listTime 来自 OKX 接口为字符串，需转 int（ms_to_datetime 内部有 / 1000）
+        start = ms_to_dt(int(list_time_ms)) if list_time_ms else None
         n = candle_dl.download_range(
             inst, bar, start=start, end=end_dt, list_time=start)
         return inst, n, None
@@ -269,13 +270,17 @@ def run_phase1(candle_dl, contracts, bar, args):
 
     end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
     attempts = 0
+    total_written = 0
+    total_fail = 0
     while not _shutdown and attempts < args.catchup_attempts:
         attempts += 1
         logger.info(f'[阶段1 全量同步] 第 {attempts}/{args.catchup_attempts} 轮追赶开始...')
-        total, fail = catch_up_pass(candle_dl, contracts, bar, end_dt, args.workers)
+        written, fail = catch_up_pass(candle_dl, contracts, bar, end_dt, args.workers)
+        total_written += written
+        total_fail += fail
         lag = catchup_lag_minutes(bar, contracts)
         logger.info(
-            f'[阶段1 全量同步] 第 {attempts} 轮完成：写入 {total:,} 根 | '
+            f'[阶段1 全量同步] 第 {attempts} 轮完成：写入 {written:,} 根 | '
             f'失败 {fail} | 当前最大落后 {lag:.1f} 分钟')
         if lag <= args.catchup_lag:
             break
@@ -285,7 +290,18 @@ def run_phase1(candle_dl, contracts, bar, args):
 
     lag = catchup_lag_minutes(bar, contracts)
     logger.info(BANNER)
-    logger.info(f'[阶段1 全量同步] 完成 | 最大落后 {lag:.1f} 分钟 -> 进入阶段2 实时同步')
+    if lag <= args.catchup_lag:
+        logger.info(f'[阶段1 全量同步] 完成 | 最大落后 {lag:.1f} 分钟 -> 进入阶段2 实时同步')
+    elif total_fail >= len(contracts) and total_written == 0:
+        # 全部合约异常且未写入任何数据：属系统性故障，如实提示而非宣称"完成"
+        logger.error(
+            f'[阶段1 全量同步] 追赶失败：{total_fail} 个合约全部异常、未写入任何数据，'
+            f'当前最大落后 {lag:.1f} 分钟。请检查网络/代理/日志后重新启动，'
+            f'本次进入阶段2 仅作增量同步，无法完成历史补齐。')
+    else:
+        logger.warning(
+            f'[阶段1 全量同步] 未完全追平（失败 {total_fail} 个合约，'
+            f'最大落后 {lag:.1f} 分钟），先进入阶段2 实时同步继续增量追赶')
     logger.info(BANNER)
 
 

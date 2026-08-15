@@ -29,7 +29,7 @@ def ms_to_datetime(ms: int, tz: str = "UTC") -> datetime:
     """将毫秒时间戳转换为datetime对象
 
     Args:
-        ms: 毫秒时间戳
+        ms: 毫秒时间戳（OKX等接口可能返回字符串，内部统一转int）
         tz: 目标时区（'UTC' 或 zoneinfo时区名）
 
     Returns:
@@ -37,6 +37,7 @@ def ms_to_datetime(ms: int, tz: str = "UTC") -> datetime:
     """
     if ms is None:
         return None
+    ms = int(ms)
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
     if tz and tz.upper() != "UTC":
         try:
