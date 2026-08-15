@@ -32,9 +32,9 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_MAX_BUFFERED_ROWS = 2000        # 单次合并写入上限
-_FLUSH_TIMEOUT = 0.05            # 等待更多数据的超时（秒）
-_PUT_TIMEOUT = 120.0             # 调用方等待写入完成的超时
+_MAX_BUFFERED_ROWS = 5000        # 单次合并写入上限
+_FLUSH_TIMEOUT = 0.1             # 等待更多数据的超时（秒）
+_PUT_TIMEOUT = 300.0              # 调用方等待写入完成的超时
 
 
 class _WriteBuffer:
@@ -139,34 +139,73 @@ class _WriteBuffer:
 
 
 def _write_to_db(rows: List[dict], overwrite: bool) -> int:
-    """实际执行一次合并写入"""
-    stmt = pg_insert(Candle)
-    if overwrite:
-        stmt = stmt.on_conflict_do_update(
-            constraint=Candle.__table__.primary_key,
-            set_={
-                "o": stmt.excluded.o,
-                "h": stmt.excluded.h,
-                "l": stmt.excluded.l,
-                "c": stmt.excluded.c,
-                "vol": stmt.excluded.vol,
-                "vol_ccy": stmt.excluded.vol_ccy,
-                "vol_ccy_quote": stmt.excluded.vol_ccy_quote,
-                "confirm": stmt.excluded.confirm,
-            },
-        )
-    else:
-        stmt = stmt.on_conflict_do_nothing(constraint=Candle.__table__.primary_key)
+    """实际执行一次合并写入，优先使用 COPY + 临时表提速"""
+    if not rows:
+        return 0
+
+    columns = [
+        "inst_id", "bar", "ts", "o", "h", "l", "c",
+        "vol", "vol_ccy", "vol_ccy_quote", "confirm",
+    ]
+
+    # 构造 COPY 输入（tab 分隔）
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(
+        buf, delimiter="\t", quoting=csv.QUOTE_MINIMAL, lineterminator="\n"
+    )
+    for r in rows:
+        writer.writerow([
+            r["inst_id"],
+            r["bar"],
+            r["ts"].isoformat() if r["ts"] else "",
+            str(r["o"]),
+            str(r["h"]),
+            str(r["l"]),
+            str(r["c"]),
+            str(r["vol"]),
+            str(r["vol_ccy"]) if r["vol_ccy"] is not None else "\\N",
+            str(r["vol_ccy_quote"]) if r["vol_ccy_quote"] is not None else "\\N",
+            str(r["confirm"]) if r["confirm"] is not None else "\\N",
+        ])
 
     engine = get_engine()
-    written = 0
-    with engine.connect() as conn:
-        for i in range(0, len(rows), 500):
-            batch = rows[i:i + 500]
-            result = conn.execute(stmt, batch)
-            written += result.rowcount or 0
-        conn.commit()
-    return written
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        cur.execute(
+            "CREATE TEMP TABLE _okx_candle_tmp ("
+            "    inst_id TEXT, bar TEXT, ts TIMESTAMPTZ, o NUMERIC, h NUMERIC, "
+            "    l NUMERIC, c NUMERIC, vol NUMERIC, vol_ccy NUMERIC, "
+            "    vol_ccy_quote NUMERIC, confirm TEXT"
+            ") ON COMMIT DROP"
+        )
+        buf.seek(0)
+        cur.copy_from(buf, "_okx_candle_tmp", columns=columns, sep="\t")
+
+        upsert_sql = """
+            INSERT INTO candles (inst_id, bar, ts, o, h, l, c, vol, vol_ccy, vol_ccy_quote, confirm)
+            SELECT inst_id, bar, ts, o, h, l, c, vol, vol_ccy, vol_ccy_quote, confirm
+            FROM _okx_candle_tmp
+            ON CONFLICT (inst_id, bar, ts)
+        """
+        if overwrite:
+            upsert_sql += """ DO UPDATE SET
+                o = EXCLUDED.o, h = EXCLUDED.h, l = EXCLUDED.l, c = EXCLUDED.c,
+                vol = EXCLUDED.vol, vol_ccy = EXCLUDED.vol_ccy,
+                vol_ccy_quote = EXCLUDED.vol_ccy_quote, confirm = EXCLUDED.confirm
+            """
+        else:
+            upsert_sql += " DO NOTHING"
+
+        cur.execute(upsert_sql)
+        rowcount = cur.rowcount
+        raw.commit()
+        return rowcount
+    finally:
+        raw.close()
 
 
 # 模块级单例
