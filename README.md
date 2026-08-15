@@ -176,7 +176,8 @@ VPN服务商节点经常变化，**不要写死节点和IP**。使用 `--dynamic
 Merge.yaml → 等待内核重启 → 验证端口 → 构建动态代理池。
 
 ```bash
-# 动态IP池：自动选16个独立IP，每IP 2个并发（--workers 自动设为IP数×2）
+# 动态IP池：自动选独立IP（默认16，本机有33个不同出口IP可--pool-size 32），
+# 每IP 4个并发（--workers 自动设为IP数×4）
 python download_all.py --dynamic --pool-size 16
 
 # 用缓存复用上次测试结果（TTL 600s，适合频繁增量运行）
@@ -198,8 +199,8 @@ python download_all.py --dynamic --pool-ttl 600
 > 性能实测（2026-08，干净环境）：OKX history-candles 按 IP 限频约
 > 20 请求/2秒。旧版令牌桶会"攒令牌→瞬间抽干"造成请求突发，频繁触发
 > 429；现已改为平滑限速（严格按间隔发放）。配合 16 个独立IP × 每IP 2
-> 线程 × 限速 8/s，实测约 **73 页/秒（≈7300 根K线/秒）且几乎无429**，
-> 相比默认 8 并发串行提升约 8~14 倍。
+> 线程 × 限速 8/s，实测约 **95+ 页/秒（≈9500 根K线/秒）且几乎无429**，
+> 相比默认 8 并发串行提升约 10~15 倍。
 
 ### 3.2 IP代理池：静态模式
 
@@ -211,7 +212,8 @@ python download_all.py --dynamic --pool-ttl 600
 OKX_PROXY_URLS=http://127.0.0.1:7891,http://127.0.0.1:7892,http://127.0.0.1:7893
 OKX_IP_RATE_LIMIT_PER_SECOND=8
 
-# --workers 建议为 IP 数×2（每IP保持2线程）
+# --workers 建议为 IP 数×4（每IP保持4线程，吃满每IP限速）
+# 本机有33个不同出口IP，--pool-size 32 可提速约2倍
 python download_all.py --proxy-pool --proxy-verify --workers 16
 ```
 
@@ -222,7 +224,7 @@ python download_all.py --proxy-pool --proxy-verify --workers 16
 **阶段1【全量同步/追赶】**——让数据库数据与OKX API对齐
 - 复用 `CandleDownloader.download_range`（缺失窗口检测 + 逐页回溯 + 批量入库），
   把每个合约缺失的数据一次性补齐到当前时刻。下载量可能很大（数据库为空时即全历史下载）。
-- **不限制系统资源**：高并发满载追赶（`--workers` 默认代理池下 IP数×2，最高64）。
+- **不限制系统资源**：高并发满载追赶（`--workers` 默认代理池下 IP数×4，最高96）。
 - 全部合约追平（落后 < `--catchup-lag` 分钟，默认10）后自动进入阶段2。
 - 大流量追赶进行中可直接 Ctrl+C 停止，已写入数据保留，下次启动继续。
 

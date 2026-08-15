@@ -312,57 +312,56 @@ class CandleDownloader:
         page = 0
         last_progress_log = time.monotonic()
 
-        engine = get_engine()
-        with engine.connect() as conn:
-            while True:
-                page += 1
-                raw_candles = self.client.get_candles(
-                    inst_id=inst_id,
-                    bar=bar,
-                    after=after_ms,
-                    limit=self.dl_cfg.max_candles_per_request,
+        while True:
+            page += 1
+            raw_candles = self.client.get_candles(
+                inst_id=inst_id,
+                bar=bar,
+                after=after_ms,
+                limit=self.dl_cfg.max_candles_per_request,
+            )
+            if not raw_candles:
+                break
+            had_data = True
+
+            oldest_ts = min(c["ts"] for c in raw_candles)
+            if after_ms is not None and oldest_ts >= after_ms:
+                # 分页无进展，防止死循环
+                break
+
+            # 收集窗口 [start_ms, end_ms] 内的K线
+            for c in raw_candles:
+                ts_ms = c["ts"]
+                if start_ms <= ts_ms <= end_ms:
+                    collected.append(c)
+
+            # 每30秒打一条进度，避免大合约(数万页)刷屏
+            now = time.monotonic()
+            if now - last_progress_log >= 30:
+                last_progress_log = now
+                logger.info(
+                    f"[进度] {inst_id} | {bar} | 回溯至 "
+                    f"{ms_to_datetime(oldest_ts):%Y-%m-%d %H:%M} | 页 {page}"
                 )
-                if not raw_candles:
-                    break
-                had_data = True
 
-                oldest_ts = min(c["ts"] for c in raw_candles)
-                if after_ms is not None and oldest_ts >= after_ms:
-                    # 分页无进展，防止死循环
-                    break
-
-                # 收集窗口 [start_ms, end_ms] 内的K线
-                for c in raw_candles:
-                    ts_ms = c["ts"]
-                    if start_ms <= ts_ms <= end_ms:
-                        collected.append(c)
-
-                # 每30秒打一条进度，避免大合约(数万页)刷屏
-                now = time.monotonic()
-                if now - last_progress_log >= 30:
-                    last_progress_log = now
-                    logger.info(
-                        f"[进度] {inst_id} | {bar} | 回溯至 "
-                        f"{ms_to_datetime(oldest_ts):%Y-%m-%d %H:%M} | 页 {page}"
-                    )
-
-                # 攒够一批立即写库，避免一次性积累海量内存
-                if len(collected) >= self.BULK_SIZE * 4:
-                    total_written += self._save_candles(
-                        inst_id, bar, collected, overwrite, conn=conn
-                    )
-                    collected.clear()
-
-                if oldest_ts <= start_ms:
-                    break
-
-                # 继续往前翻更旧数据
-                after_ms = oldest_ts
-
-            if collected:
+            # 攒够一批立即写库，避免一次性积累海量内存。
+            # 每批用独立短连接(不持连接)，worker数量不受DB连接池限制
+            if len(collected) >= self.BULK_SIZE * 4:
                 total_written += self._save_candles(
-                    inst_id, bar, collected, overwrite, conn=conn
+                    inst_id, bar, collected, overwrite
                 )
+                collected.clear()
+
+            if oldest_ts <= start_ms:
+                break
+
+            # 继续往前翻更旧数据
+            after_ms = oldest_ts
+
+        if collected:
+            total_written += self._save_candles(
+                inst_id, bar, collected, overwrite
+            )
         return total_written, had_data
 
     def _save_candles(

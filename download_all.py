@@ -132,11 +132,11 @@ def main():
         candle_dl = CandleDownloader(client, cfg)
         bar = args.bar
 
-        # 并发数默认值：代理池模式下每IP保持2个并发（实测 16IP×2线程 ≈ 73 pages/s 且无429），
-        # 直连模式下默认8个并发。
+        # 并发数默认值：代理池模式下每IP 4个并发（实测每线程~2页/s、请求延迟
+        # ~450ms，需4线程才吃满每IP 8/s限速；写库已改为每批短连接，不受DB池限制）
         if args.workers is None:
             if pool is not None and len(pool) > 0:
-                args.workers = max(1, min(2 * len(pool), 128))
+                args.workers = max(2, min(4 * len(pool), 96))
             else:
                 args.workers = 8
 
