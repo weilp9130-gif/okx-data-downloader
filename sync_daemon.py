@@ -27,18 +27,18 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime
 from queue import Queue, Empty
 
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from config import Config
-from utils.logger import setup_logging, get_logger
-from database import init_db, dispose_engine, get_engine
-from okx_client import OKXClient
-from models import Candle, FundingRate
-from utils.time_utils import ms_to_datetime, utc_now
+from app.config import Config
+from app.utils.logger import setup_logging, get_logger
+from app.database import init_db, dispose_engine, get_engine
+from app.okx_client import OKXClient
+from app.models import Candle, FundingRate
+from app.utils.time_utils import ms_to_datetime, bar_to_seconds
 
 logger = get_logger(__name__)
 
@@ -69,15 +69,6 @@ def parse_args():
     p.add_argument('--log-level', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                    default=None, help='日志级别')
     return p.parse_args()
-
-
-def bar_to_seconds(bar):
-    mapping = {
-        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-        "1H": 3600, "2H": 7200, "4H": 14400, "12H": 43200,
-        "1D": 86400, "1W": 604800, "1M": 2592000,
-    }
-    return mapping.get(bar, 60)
 
 
 # ======================================================================

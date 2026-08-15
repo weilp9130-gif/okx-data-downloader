@@ -39,14 +39,14 @@ from queue import Queue, Empty
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from config import Config
-from utils.logger import setup_logging, get_logger
-from database import init_db, dispose_engine, get_engine
-from okx_client import OKXClient
-from models import Candle
-from proxy_pool import build_proxy_pool
-from downloader.candles import CandleDownloader
-from utils.time_utils import ms_to_datetime, bar_to_seconds
+from app.config import Config
+from app.utils.logger import setup_logging, get_logger
+from app.database import init_db, dispose_engine, get_engine
+from app.okx_client import OKXClient
+from app.models import Candle
+from app.proxy_pool import build_proxy_pool
+from app.downloader.candles import CandleDownloader
+from app.utils.time_utils import ms_to_datetime, bar_to_seconds
 
 logger = get_logger(__name__)
 

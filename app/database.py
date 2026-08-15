@@ -14,8 +14,8 @@ from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
-from config import Config
-from utils.logger import get_logger
+from .config import Config
+from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -36,7 +36,7 @@ def get_engine() -> Engine:
     global _engine
     if _engine is None:
         # 下载前确保数据库可用：已有数据库直连；不可达且允许时自动用Docker启动
-        from db_docker import ensure_database
+        from .db_docker import ensure_database
         ensure_database()
 
         cfg = Config().database
@@ -106,7 +106,7 @@ def session_scope() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     """初始化数据库：创建所有表和TimescaleDB hypertable"""
-    from models import Candle, FundingRate  # 导入以注册模型
+    from .models import Candle, FundingRate  # 导入以注册模型
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)

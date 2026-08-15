@@ -28,13 +28,13 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from config import Config
-from utils.logger import setup_logging, get_logger
-from utils.time_utils import parse_date as _parse_date, ms_to_datetime as _ms_to_datetime
-from database import init_db, dispose_engine
-from okx_client import OKXClient
-from proxy_pool import build_proxy_pool
-from downloader.candles import CandleDownloader
+from app.config import Config
+from app.utils.logger import setup_logging, get_logger
+from app.utils.time_utils import parse_date as _parse_date, ms_to_datetime as _ms_to_datetime
+from app.database import init_db, dispose_engine
+from app.okx_client import OKXClient
+from app.proxy_pool import build_proxy_pool
+from app.downloader.candles import CandleDownloader
 
 logger = get_logger(__name__)
 

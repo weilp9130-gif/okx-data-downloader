@@ -9,8 +9,8 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
-# 项目根目录
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 项目根目录（app/utils/logger.py -> 项目根）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 
 # 日志格式

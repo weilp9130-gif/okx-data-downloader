@@ -7,12 +7,8 @@
 所有表使用复合主键 + TimescaleDB hypertable按键。
 """
 
-from datetime import datetime
-
 from sqlalchemy import (
     Column,
-    Float,
-    Integer,
     String,
     DateTime,
     Numeric,
@@ -20,7 +16,7 @@ from sqlalchemy import (
     Index,
 )
 
-from database import Base
+from .database import Base
 
 
 class Candle(Base):

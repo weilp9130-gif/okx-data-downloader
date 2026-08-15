@@ -18,35 +18,41 @@
 
 ```
 okx_data_downloader
-├── main.py           # 程序入口（命令行CLI）
-├── download_all.py   # ★全历史并行下载脚本（多合约 × 时间窗，支持IP代理池）
-├── sync_continuous.py# ★连续同步下载脚本（两阶段：先全量追赶，再低资源实时同步）
-├── sync_daemon.py    # 常驻实时同步守护（K线+资金费率，按K线周期对齐）
-├── config.py         # 配置模块（dataclass + .env）
-├── database.py       # 数据库连接（SQLAlchemy Engine/Session）
-├── db_docker.py      # Docker数据库引导（下载前自动检测/启动timescale容器）
-├── models.py         # ORM数据模型
-├── okx_client.py     # OKX API客户端（限速/重试/线程本地Session/代理池）
-├── proxy_pool.py     # IP代理池（每IP独立限速/健康管理/IP去重探测）
-├── dynamic_pool.py   # ★动态IP代理池（每次下载前自动发现/测IP/应用listeners）
-├── downloader/
+├── app/                 # ★核心库（包）
 │   ├── __init__.py
-│   ├── candles.py    # K线下载模块
-│   └── funding.py    # 资金费率下载模块
-├── utils/
-│   ├── __init__.py
-│   ├── logger.py     # 日志系统
-│   └── time_utils.py # 时间工具
-├── runtime/          # 动态池运行时产物（节点缓存/监听配置，已忽略不上传）
-├── env.template      # 环境变量模板
-├── requirements.txt  # Python依赖
-├── run_example.py    # 编程式使用示例
-└── logs/             # 日志目录（已忽略）
+│   ├── config.py        # 配置模块（dataclass + .env）
+│   ├── database.py      # 数据库连接（SQLAlchemy Engine/Session + Docker引导）
+│   ├── db_docker.py     # Docker数据库引导（下载前自动检测/启动timescale容器）
+│   ├── models.py        # ORM数据模型（candles/funding_rates/download_state）
+│   ├── okx_client.py    # OKX API客户端（限速/重试/线程本地Session/代理池）
+│   ├── proxy_pool.py    # IP代理池（每IP平滑限速/健康管理/IP去重探测）
+│   ├── dynamic_pool.py  # ★动态IP代理池（自动发现/测IP/应用listeners）
+│   ├── downloader/
+│   │   ├── __init__.py
+│   │   ├── candles.py   # K线下载模块（缺失窗口检测/回溯/批量入库）
+│   │   └── funding.py   # 资金费率下载模块
+│   └── utils/
+│       ├── __init__.py
+│       ├── logger.py    # 日志系统（控制台+文件轮转）
+│       └── time_utils.py# 时间工具
+├── main.py              # ★入口：单币种下载/增量/初始化数据库
+├── download_all.py      # ★入口：全历史并行下载（支持IP代理池）
+├── sync_continuous.py   # ★入口：连续同步（先全量追赶，再低资源实时同步）
+├── sync_daemon.py       # ★入口：常驻实时同步守护（K线+资金费率）
+├── tests/               # 单元测试（离线，python -m unittest discover -s tests）
+├── pyproject.toml       # 包元数据/依赖（可选 pip install -e .）
+├── env.template         # 环境变量模板
+├── requirements.txt     # Python依赖
+├── runtime/             # 动态池运行时产物（节点缓存/监听配置，已忽略不上传）
+└── logs/                # 日志目录（已忽略）
 ```
+
+> 代码组织：`app/` 为可复用的库代码包，根目录四个入口脚本是面向任务的 CLI，
+> 均可直接 `python xxx.py` 运行。单元测试位于 `tests/`（离线，不依赖网络/数据库）。
 
 ## 环境要求
 
-- Python 3.8+
+- Python 3.9+
 - PostgreSQL 12+ （含 TimescaleDB 扩展）
 
 ## 安装
@@ -256,13 +262,14 @@ python main.py --type funding --inst ETH-USDT-SWAP
 
 ### 6. 编程式使用
 
-参考 `run_example.py`：
-
 ```python
-from okx_client import OKXClient
-from downloader.candles import CandleDownloader
+from app.config import Config
+from app.okx_client import OKXClient
+from app.downloader.candles import CandleDownloader
+from app.database import init_db, dispose_engine
 from datetime import datetime, timedelta
 
+init_db()
 config = Config()
 client = OKXClient()
 dl = CandleDownloader(client, config)
@@ -273,6 +280,14 @@ dl.download_range(
     start=datetime.utcnow() - timedelta(days=30),
     end=datetime.utcnow(),
 )
+dispose_engine()
+```
+
+### 7. 单元测试
+
+```bash
+# 离线测试（不依赖网络/数据库）
+python -m unittest discover -s tests -v
 ```
 
 ## 数据库表结构

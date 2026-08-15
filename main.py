@@ -14,14 +14,14 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
-from config import Config
-from utils.logger import setup_logging, get_logger
-from utils.time_utils import parse_date, utc_now
-from database import init_db, dispose_engine
-from okx_client import OKXClient
-from proxy_pool import build_proxy_pool
-from downloader.candles import CandleDownloader
-from downloader.funding import FundingRateDownloader
+from app.config import Config
+from app.utils.logger import setup_logging, get_logger
+from app.utils.time_utils import parse_date, utc_now
+from app.database import init_db, dispose_engine
+from app.okx_client import OKXClient
+from app.proxy_pool import build_proxy_pool
+from app.downloader.candles import CandleDownloader
+from app.downloader.funding import FundingRateDownloader
 
 logger = get_logger(__name__)
 

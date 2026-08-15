@@ -25,19 +25,18 @@ VPN服务商节点不稳定：节点名、出口IP随时可能变化。因此不
 import json
 import os
 import socket
-import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from proxy_pool import ProxyPool, SKIP_TYPES, SKIP_PREFIXES, get_exit_ip
-from utils.logger import get_logger
+from .proxy_pool import ProxyPool, SKIP_TYPES, SKIP_PREFIXES, get_exit_ip
+from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
 CACHE_FILE = RUNTIME_DIR / "dynamic_pool_cache.json"
 LISTENERS_FILE = RUNTIME_DIR / "mihomo_listeners.yaml"

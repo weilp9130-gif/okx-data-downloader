@@ -33,17 +33,16 @@ N 个独立IP 即可获得约 N 倍的吞吐(一个币一个IP)。
         pool.report_fail(proxy, is_429=(429 in ...))
 """
 
-import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-from config import Config
-from utils.logger import get_logger
+from .config import Config
+from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
