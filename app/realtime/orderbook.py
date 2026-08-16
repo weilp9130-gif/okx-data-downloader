@@ -14,6 +14,54 @@ from ..utils.time_utils import ms_to_datetime
 
 logger = get_logger(__name__)
 
+# OKX OrderBook 频道能力表
+# depth: 频道提供的深度档位；incremental: 是否增量推送；vip: 最低 VIP 要求
+ORDERBOOK_CHANNELS = {
+    "books": {"depth": 400, "incremental": True, "vip": 0},
+    "books5": {"depth": 5, "incremental": False, "vip": 0},
+    "bbo-tbt": {"depth": 1, "incremental": False, "vip": 0},
+    "books50-l2-tbt": {"depth": 50, "incremental": True, "vip": 4},
+    "books-l2-tbt": {"depth": 400, "incremental": True, "vip": 5},
+}
+
+
+def describe_channel(channel: str) -> dict:
+    """返回频道能力描述，未知频道抛 ValueError"""
+    if channel not in ORDERBOOK_CHANNELS:
+        raise ValueError(
+            f"未知 OrderBook 频道: {channel}（可选: {', '.join(sorted(ORDERBOOK_CHANNELS))}）"
+        )
+    return ORDERBOOK_CHANNELS[channel]
+
+
+def validate_channel(channel: str, allow_vip: bool = False) -> dict:
+    """校验频道可用性并输出能力信息
+
+    Args:
+        channel: OrderBook 频道名
+        allow_vip: 是否允许使用需要 VIP 权限的频道
+
+    Returns:
+        dict: 频道能力
+
+    Raises:
+        ValueError: 频道未知，或需要 VIP 权限但未显式允许
+    """
+    caps = describe_channel(channel)
+    logger.info(
+        "OrderBook channel: %s | Depth: %d | Incremental: %s | VIP requirement: %s",
+        channel,
+        caps["depth"],
+        "YES" if caps["incremental"] else "NO",
+        f"VIP{caps['vip']}+" if caps["vip"] else "NO",
+    )
+    if caps["vip"] and not allow_vip:
+        raise ValueError(
+            f"频道 {channel} 需要 VIP{caps['vip']}+ 权限。"
+            f"如账户已满足，请设置 ORDERBOOK_ALLOW_VIP=true 后重试。"
+        )
+    return caps
+
 
 class OrderBookState:
     """OrderBook 内存状态对象"""
@@ -26,6 +74,7 @@ class OrderBookState:
         self.seq_id: Optional[int] = None
         self.prev_seq_id: Optional[int] = None
         self.last_update_ts: Optional[datetime] = None
+        self.last_received_at: Optional[datetime] = None
         self.state = "INIT"
         self.resync_count = 0
         self.last_resync_reason: Optional[str] = None
@@ -39,6 +88,7 @@ class OrderBookState:
             self.seq_id = self._to_int(data.get("seqId"))
             self.prev_seq_id = self._to_int(data.get("prevSeqId"))
             self.last_update_ts = self._parse_ts(data.get("ts"))
+            self.last_received_at = datetime.now(timezone.utc)
             self.state = "RUNNING"
             self.last_resync_reason = None
 
@@ -60,6 +110,7 @@ class OrderBookState:
                 self.seq_id = new_seq
                 self.prev_seq_id = new_prev
                 self.last_update_ts = self._parse_ts(data.get("ts"))
+                self.last_received_at = datetime.now(timezone.utc)
                 return True
 
             # 官方序列重置（维护导致 seqId 归零）
@@ -72,6 +123,7 @@ class OrderBookState:
                 self.prev_seq_id = new_prev
                 self._apply_delta(data.get("bids", []), data.get("asks", []))
                 self.last_update_ts = self._parse_ts(data.get("ts"))
+                self.last_received_at = datetime.now(timezone.utc)
                 return True
 
             logger.warning(
@@ -168,20 +220,23 @@ class OrderBookState:
 class OrderBookHandler:
     """处理 OKX orderbook 频道 WS 消息"""
 
-    def __init__(self, inst_id: str, channel: str = "books", depth: int = 400):
+    def __init__(self, inst_id: str, channel: str = "books",
+                 depth: Optional[int] = None, snapshot_levels: int = 5):
         self.inst_id = inst_id
         self.channel = channel
-        self.depth = depth
-        self.state = OrderBookState(inst_id, depth=depth)
+        caps = ORDERBOOK_CHANNELS.get(channel, {"depth": 400})
+        self.depth = depth if depth is not None else caps["depth"]
+        self.snapshot_levels = snapshot_levels
+        self.state = OrderBookState(inst_id, depth=self.depth)
 
     def handle(self, data: dict) -> Optional[dict]:
         """处理 WS 消息
 
         Returns:
-            dict or None: 处理后的快照信息（仅 PERIODIC/RESYNC 快照）
+            dict or None: 处理后的快照信息（仅 INITIAL/RESYNC 快照）
         """
         arg = data.get("arg", {})
-        if arg.get("channel") not in ("books", "books5", "books50-l2-tbt", "books-l2-tbt", "bbo-tbt"):
+        if arg.get("channel") not in ORDERBOOK_CHANNELS:
             return None
 
         action = data.get("action")
@@ -218,13 +273,14 @@ class OrderBookHandler:
         return None
 
     def periodic_snapshot(self) -> Optional[dict]:
-        """生成周期性快照记录"""
+        """生成周期性快照记录（PERIODIC）"""
         if self.state.state != "RUNNING":
             return None
         bids, asks = self.state.snapshot()
         if not bids or not asks:
             return None
         now = datetime.now(timezone.utc)
+        levels = self.snapshot_levels
         best_bid = bids[0]
         best_ask = asks[0]
         return {
@@ -232,8 +288,9 @@ class OrderBookHandler:
             "ts": self.state.last_update_ts or now,
             "exchange_ts": self.state.last_update_ts or now,
             "snapshot_at": now,
-            "bids": bids[:5],
-            "asks": asks[:5],
+            "received_at": self.state.last_received_at,
+            "bids": bids[:levels],
+            "asks": asks[:levels],
             "best_bid_px": best_bid[0],
             "best_bid_sz": best_bid[1],
             "best_ask_px": best_ask[0],
@@ -244,10 +301,15 @@ class OrderBookHandler:
             "snapshot_type": "PERIODIC",
         }
 
+    def full_book(self):
+        """返回当前完整盘口副本（供因子计算使用，覆盖频道深度）"""
+        return self.state.snapshot()
+
     def _build_snapshot_record(self, item: dict, snapshot_type: str = "INITIAL") -> dict:
         now = datetime.now(timezone.utc)
-        bids = self.state.bids[:5]
-        asks = self.state.asks[:5]
+        levels = self.snapshot_levels
+        bids = self.state.bids[:levels]
+        asks = self.state.asks[:levels]
         best_bid = bids[0] if bids else [None, None]
         best_ask = asks[0] if asks else [None, None]
         return {
@@ -255,6 +317,7 @@ class OrderBookHandler:
             "ts": self.state.last_update_ts or now,
             "exchange_ts": self.state.last_update_ts or now,
             "snapshot_at": now,
+            "received_at": self.state.last_received_at,
             "bids": bids,
             "asks": asks,
             "best_bid_px": best_bid[0],

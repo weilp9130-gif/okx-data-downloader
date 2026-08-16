@@ -157,11 +157,56 @@ class DownloadConfig:
 
 
 @dataclass
+class OrderBookConfig:
+    """OrderBook WebSocket 频道配置
+
+    不同频道深度、推送频率、seqId 行为、资源消耗不同，必须配置化，
+    不在代码里硬编码。
+    """
+
+    channel: str = field(
+        default_factory=lambda: os.getenv("ORDERBOOK_CHANNEL", "books")
+    )
+    # 本地 OrderBookState 持久化间隔（秒）
+    snapshot_interval: int = field(
+        default_factory=lambda: int(os.getenv("ORDERBOOK_SNAPSHOT_INTERVAL", "5"))
+    )
+    # 快照写库时保留的档位数（JSONB 体积控制）
+    snapshot_levels: int = field(
+        default_factory=lambda: int(os.getenv("ORDERBOOK_SNAPSHOT_LEVELS", "5"))
+    )
+    # books-l2-tbt / books50-l2-tbt 需要 VIP4+，显式确认后才允许订阅
+    allow_vip: bool = field(
+        default_factory=lambda: os.getenv("ORDERBOOK_ALLOW_VIP", "false").lower() == "true"
+    )
+
+
+@dataclass
+class RetentionConfig:
+    """Retention 配置（Retention != 永久删除，删除前应导出冷存储）"""
+
+    enabled: bool = field(
+        default_factory=lambda: os.getenv("RETENTION_ENABLED", "false").lower() == "true"
+    )
+    order_book_snapshots_days: int = field(
+        default_factory=lambda: int(os.getenv("RETENTION_ORDER_BOOK_SNAPSHOTS_DAYS", "30"))
+    )
+    trades_days: int = field(
+        default_factory=lambda: int(os.getenv("RETENTION_TRADES_DAYS", "0"))
+    )
+    order_book_factors_days: int = field(
+        default_factory=lambda: int(os.getenv("RETENTION_ORDER_BOOK_FACTORS_DAYS", "0"))
+    )
+
+
+@dataclass
 class Config:
     """全局配置聚合"""
     okx: OKXConfig = field(default_factory=OKXConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     download: DownloadConfig = field(default_factory=DownloadConfig)
+    orderbook: OrderBookConfig = field(default_factory=OrderBookConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
 
     timezone: str = field(default_factory=lambda: os.getenv("TIMEZONE", "Asia/Shanghai"))

@@ -108,6 +108,7 @@ def init_db() -> None:
     """初始化数据库：创建所有表和TimescaleDB hypertable"""
     from .models import (  # 导入以注册模型
         Candle,
+        DataConflict,
         DataGap,
         DataQualityState,
         FundingRate,
@@ -192,10 +193,56 @@ def _create_hypertables(engine: Engine) -> None:
                 "chunk_time_interval => INTERVAL '2 weeks', "
                 "if_not_exists => TRUE, migrate_data => TRUE)"
             ))
+            # Phase 6 OrderBook（Derived 层）
+            conn.execute(text(
+                "SELECT create_hypertable('order_book_snapshots', 'ts', "
+                "chunk_time_interval => INTERVAL '1 week', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('order_book_factors', 'ts', "
+                "chunk_time_interval => INTERVAL '1 week', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
             conn.commit()
             logger.info("TimescaleDB hypertable 创建完成")
     except Exception as e:
         logger.warning(f"TimescaleDB hypertable创建失败（可忽略，将使用普通表）: {e}")
+
+    _apply_retention_policies(engine)
+
+
+def _apply_retention_policies(engine: Engine) -> None:
+    """按配置应用 TimescaleDB retention policy
+
+    Retention != 永久删除：删除前应先导出冷存储（Parquet/CSV）。
+    默认关闭（RETENTION_ENABLED=false），需显式开启。
+    """
+    from .config import Config
+
+    cfg = Config().retention
+    if not cfg.enabled:
+        logger.debug("Retention policy 未启用（RETENTION_ENABLED=false）")
+        return
+
+    policies = [
+        ("order_book_snapshots", cfg.order_book_snapshots_days),
+        ("order_book_factors", cfg.order_book_factors_days),
+        ("trades", cfg.trades_days),
+    ]
+    try:
+        with engine.connect() as conn:
+            for table, days in policies:
+                if days <= 0:
+                    continue
+                conn.execute(text(
+                    "SELECT add_retention_policy(:table, INTERVAL :interval, "
+                    "if_not_exists => TRUE)"
+                ).bindparams(table=table, interval=f"{days} days"))
+                logger.info("Retention policy 已应用: %s 保留 %d 天", table, days)
+            conn.commit()
+    except Exception as e:
+        logger.warning("Retention policy 应用失败（可忽略）: %s", e)
 
 
 def dispose_engine() -> None:

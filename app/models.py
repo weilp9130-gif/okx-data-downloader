@@ -184,7 +184,9 @@ class OrderBookSnapshot(Base):
     snapshot_type = Column(String(20))
 
     __table_args__ = (
-        PrimaryKeyConstraint("inst_id", "snapshot_at"),
+        # 业务唯一键是 (inst_id, snapshot_at)；TimescaleDB 要求分区列 ts 必须
+        # 包含在唯一约束中，因此主键为三列，去重语义仍由 (inst_id, snapshot_at) 决定
+        PrimaryKeyConstraint("inst_id", "snapshot_at", "ts"),
         Index("ix_ob_inst_snapshot", "inst_id", "snapshot_at"),
         Index("ix_ob_ts", "ts"),
     )
@@ -576,6 +578,37 @@ class Instrument(Base):
 
     def __repr__(self) -> str:
         return f"<Instrument(inst_id={self.inst_id}, type={self.inst_type}, state={self.state})>"
+
+
+class DataConflict(Base):
+    """Raw 数据冲突登记（DATA_CONFLICT）
+
+    相同业务唯一键但 payload hash 不同时登记，禁止静默覆盖，需人工确认。
+    """
+
+    __tablename__ = "data_conflicts"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    table_name = Column(String(50), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    biz_key = Column(String(200), nullable=False)
+    existing_hash = Column(String(64))
+    incoming_hash = Column(String(64))
+    existing_payload = Column(JSONB)
+    incoming_payload = Column(JSONB)
+    source = Column(String(20))
+    detected_at = Column(DateTime(timezone=True))
+    status = Column(String(20))
+
+    __table_args__ = (
+        Index("ix_data_conflicts_table_biz", "table_name", "inst_id", "biz_key"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataConflict(table={self.table_name}, inst={self.inst_id}, "
+            f"key={self.biz_key}, status={self.status})>"
+        )
 
 
 class RecoveryEvent(Base):

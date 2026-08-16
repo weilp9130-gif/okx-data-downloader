@@ -1,13 +1,12 @@
 """Trades 历史成交下载模块"""
 
-import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..config import Config
+from ..conflict import DataConflictDetector, canonical_hash
 from ..database import get_engine
 from ..models import Trade, TradesSyncState
 from ..okx_client import OKXClient
@@ -23,6 +22,7 @@ class TradesDownloader:
     def __init__(self, client: Optional[OKXClient] = None, cfg: Optional[Config] = None):
         self.client = client or OKXClient()
         self.cfg = cfg or Config()
+        self.conflicts = DataConflictDetector()
 
     def download_range(
         self,
@@ -111,9 +111,7 @@ class TradesDownloader:
     def _normalize(self, raw: dict, inst_id: str) -> dict:
         ts = ms_to_datetime(int(raw["ts"]))
         raw_json = raw
-        raw_hash = hashlib.sha256(
-            json.dumps(raw_json, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
+        raw_hash = canonical_hash(raw_json)
         return {
             "inst_id": inst_id,
             "trade_id": raw["tradeId"],
@@ -134,9 +132,15 @@ class TradesDownloader:
     def _insert(self, rows: List[dict]) -> int:
         if not rows:
             return 0
+        # Raw 数据不可静默覆盖：同键不同 payload 登记 DATA_CONFLICT 后剔除
+        safe_rows, conflicts = self.conflicts.detect_trades(rows)
+        if conflicts:
+            logger.error(
+                "检测到 %d 条 trades DATA_CONFLICT，已登记并跳过写入", len(conflicts)
+            )
         written = 0
-        for i in range(0, len(rows), self.BULK_SIZE):
-            batch = rows[i : i + self.BULK_SIZE]
+        for i in range(0, len(safe_rows), self.BULK_SIZE):
+            batch = safe_rows[i : i + self.BULK_SIZE]
             written += self._insert_batch(batch)
         return written
 
@@ -144,20 +148,9 @@ class TradesDownloader:
         if not rows:
             return 0
         stmt = pg_insert(Trade).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["inst_id", "trade_id", "ts"],
-            set_={
-                "ts": stmt.excluded.ts,
-                "px": stmt.excluded.px,
-                "sz": stmt.excluded.sz,
-                "side": stmt.excluded.side,
-                "source": stmt.excluded.source,
-                "fetched_at": stmt.excluded.fetched_at,
-                "ingested_at": stmt.excluded.ingested_at,
-                "fill_time": stmt.excluded.fill_time,
-                "raw_json": stmt.excluded.raw_json,
-                "raw_hash": stmt.excluded.raw_hash,
-            },
+        # hash 相同的重复数据无需覆盖（Raw 不可变）
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["inst_id", "trade_id", "ts"]
         )
         engine = get_engine()
         with engine.begin() as conn:

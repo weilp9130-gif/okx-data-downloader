@@ -182,15 +182,44 @@ python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1m --start
 python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1s --start 2026-08-16 --end 2026-08-17
 ```
 
-### 2.5 WebSocket OrderBook（Phase 6）
+### 2.5 WebSocket OrderBook（Phase 6 / Phase 10）
 
 ```bash
-# 实时采集 OrderBook 快照（写入 order_book_snapshots）
+# 实时采集 OrderBook（写入 order_book_snapshots + order_book_factors）
 python sync_realtime.py --insts BTC-USDT-SWAP --channels orderbook
 
 # 同时采集 trades + orderbook
 python sync_realtime.py --insts BTC-USDT-SWAP --channels trades,orderbook
 ```
+
+运行时会输出所选频道的能力信息，无权限频道启动即报错（不会运行后反复重试）：
+
+```
+OrderBook channel: books | Depth: 400 | Incremental: YES | VIP requirement: NO
+OrderBook 周期采样启动: interval=5s | levels=5
+```
+
+**频道配置**（`.env`，不在代码里硬编码）：
+
+| 频道 | 深度 | 增量推送 | VIP 要求 |
+|------|------|----------|----------|
+| `books`（默认） | 400 档 | 是 | 无 |
+| `books5` | 5 档 | 否 | 无 |
+| `bbo-tbt` | 1 档 | 否 | 无 |
+| `books50-l2-tbt` | 50 档 | 是 | VIP4+ |
+| `books-l2-tbt` | 400 档 | 是 | VIP5+ |
+
+```bash
+ORDERBOOK_CHANNEL=books              # 订阅频道
+ORDERBOOK_SNAPSHOT_INTERVAL=5        # 本地状态持久化间隔（秒）
+ORDERBOOK_SNAPSHOT_LEVELS=5          # 快照写库档位数（因子仍按完整盘口算）
+ORDERBOOK_ALLOW_VIP=false            # 订阅 VIP 频道需显式置 true
+```
+
+**数据分层**：`OrderBookState`（内存，覆盖频道深度）→ 周期采样 →
+`order_book_snapshots`（Derived，非 Raw）+ `order_book_factors`
+（spread / mid / wmid / depth_5_10 / imbalance_5_10）；`order_book_sync_state`
+记录 seq 与 resync 状态。
 
 ### 2.6 WebSocket 市场数据（Phase 7：OI / Funding / Mark / Index）
 
@@ -228,6 +257,32 @@ FROM recovery_events ORDER BY id DESC LIMIT 20;
 
 -- 查看未恢复缺口
 SELECT * FROM data_gaps WHERE status = 'OPEN';
+```
+
+### 2.8 Raw 数据冲突与 Retention（Phase 10）
+
+**DATA_CONFLICT**：Raw 数据是最终事实来源，禁止静默覆盖。写入 `trades` 前会比对
+`raw_hash`：
+
+```
+相同业务键 (inst_id, trade_id, ts)
+    ├── raw_hash 相同 → duplicate（ON CONFLICT DO NOTHING）
+    └── raw_hash 不同 → DATA_CONFLICT（登记 data_conflicts，跳过写入，需人工确认）
+```
+
+```sql
+-- 查看未处理冲突
+SELECT table_name, inst_id, biz_key, existing_hash, incoming_hash, detected_at
+FROM data_conflicts WHERE status = 'OPEN';
+```
+
+**Retention**：默认关闭。启用前应先导出冷存储（Retention != 永久删除）。
+
+```bash
+RETENTION_ENABLED=true
+RETENTION_ORDER_BOOK_SNAPSHOTS_DAYS=30   # 0 = 不设置该表策略
+RETENTION_ORDER_BOOK_FACTORS_DAYS=0      # 因子建议长期保留
+RETENTION_TRADES_DAYS=0
 ```
 
 ### 2.2 数据质量报告（Phase 3 / Phase 9）

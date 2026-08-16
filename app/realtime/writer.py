@@ -1,10 +1,8 @@
 """实时数据写入模块
 
-BaseWriter + TradeWriter + OrderBookWriter
+BaseWriter + TradeWriter + OrderBookWriter + MarketDataWriter
 """
 
-import hashlib
-import json
 import queue
 import threading
 import time
@@ -14,6 +12,7 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from ..conflict import DataConflictDetector, canonical_hash
 from ..database import get_engine
 from ..utils.logger import get_logger
 
@@ -81,66 +80,110 @@ class BaseWriter(ABC):
 
 
 class OrderBookWriter(BaseWriter):
-    """OrderBook 快照写入器"""
+    """OrderBook 快照 / 因子 / 同步状态写入器"""
 
     def __init__(self):
         super().__init__()
         self.engine = get_engine()
 
     def _flush(self, batch: List[dict]) -> None:
-        from ..models import OrderBookSnapshot, OrderBookFactor
-
         if not batch:
             return
         snapshot_rows = [b for b in batch if b.get("__type") == "snapshot"]
         factor_rows = [b for b in batch if b.get("__type") == "factor"]
+        state_rows = [b for b in batch if b.get("__type") == "sync_state"]
+
+        if snapshot_rows:
+            self._flush_snapshots(snapshot_rows)
+        if factor_rows:
+            self._flush_factors(factor_rows)
+        if state_rows:
+            self._flush_sync_state(state_rows)
+
+    def _flush_snapshots(self, rows: List[dict]) -> None:
+        from ..models import OrderBookSnapshot
+
+        for row in rows:
+            row.pop("__type", None)
+        stmt = pg_insert(OrderBookSnapshot).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["inst_id", "snapshot_at", "ts"],
+            set_={
+                "bids": stmt.excluded.bids,
+                "asks": stmt.excluded.asks,
+                "best_bid_px": stmt.excluded.best_bid_px,
+                "best_bid_sz": stmt.excluded.best_bid_sz,
+                "best_ask_px": stmt.excluded.best_ask_px,
+                "best_ask_sz": stmt.excluded.best_ask_sz,
+                "seq_id": stmt.excluded.seq_id,
+                "prev_seq_id": stmt.excluded.prev_seq_id,
+                "checksum": stmt.excluded.checksum,
+                "source": stmt.excluded.source,
+                "snapshot_type": stmt.excluded.snapshot_type,
+                "received_at": stmt.excluded.received_at,
+            },
+        )
         try:
-            if snapshot_rows:
-                for row in snapshot_rows:
-                    row.pop("__type", None)
-                stmt = pg_insert(OrderBookSnapshot).values(snapshot_rows)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["inst_id", "snapshot_at"],
-                    set_={
-                        "bids": stmt.excluded.bids,
-                        "asks": stmt.excluded.asks,
-                        "best_bid_px": stmt.excluded.best_bid_px,
-                        "best_bid_sz": stmt.excluded.best_bid_sz,
-                        "best_ask_px": stmt.excluded.best_ask_px,
-                        "best_ask_sz": stmt.excluded.best_ask_sz,
-                        "seq_id": stmt.excluded.seq_id,
-                        "prev_seq_id": stmt.excluded.prev_seq_id,
-                        "checksum": stmt.excluded.checksum,
-                        "source": stmt.excluded.source,
-                        "snapshot_type": stmt.excluded.snapshot_type,
-                    },
-                )
-                with self.engine.begin() as conn:
-                    conn.execute(stmt)
-                logger.info("OrderBookWriter flushed %d snapshots", len(snapshot_rows))
-            if factor_rows:
-                for row in factor_rows:
-                    row.pop("__type", None)
-                stmt = pg_insert(OrderBookFactor).values(factor_rows)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["inst_id", "ts"],
-                    set_={
-                        "spread": stmt.excluded.spread,
-                        "mid": stmt.excluded.mid,
-                        "wmid": stmt.excluded.wmid,
-                        "bid_depth_5": stmt.excluded.bid_depth_5,
-                        "ask_depth_5": stmt.excluded.ask_depth_5,
-                        "bid_depth_10": stmt.excluded.bid_depth_10,
-                        "ask_depth_10": stmt.excluded.ask_depth_10,
-                        "imbalance_5": stmt.excluded.imbalance_5,
-                        "imbalance_10": stmt.excluded.imbalance_10,
-                    },
-                )
-                with self.engine.begin() as conn:
-                    conn.execute(stmt)
-                logger.info("OrderBookWriter flushed %d factors", len(factor_rows))
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+            logger.info("OrderBookWriter flushed %d snapshots", len(rows))
         except Exception as e:
-            logger.error("OrderBookWriter flush failed: %s", e)
+            logger.error("OrderBookWriter snapshot flush failed: %s", e)
+
+    def _flush_factors(self, rows: List[dict]) -> None:
+        from ..models import OrderBookFactor
+
+        for row in rows:
+            row.pop("__type", None)
+        stmt = pg_insert(OrderBookFactor).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["inst_id", "ts"],
+            set_={
+                "spread": stmt.excluded.spread,
+                "mid": stmt.excluded.mid,
+                "wmid": stmt.excluded.wmid,
+                "bid_depth_5": stmt.excluded.bid_depth_5,
+                "ask_depth_5": stmt.excluded.ask_depth_5,
+                "bid_depth_10": stmt.excluded.bid_depth_10,
+                "ask_depth_10": stmt.excluded.ask_depth_10,
+                "imbalance_5": stmt.excluded.imbalance_5,
+                "imbalance_10": stmt.excluded.imbalance_10,
+            },
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+            logger.info("OrderBookWriter flushed %d factors", len(rows))
+        except Exception as e:
+            logger.error("OrderBookWriter factor flush failed: %s", e)
+
+    def _flush_sync_state(self, rows: List[dict]) -> None:
+        from ..models import OrderBookSyncState
+
+        # 同一 inst_id 只保留最新一条，避免同批 UPSERT 冲突
+        latest: dict = {}
+        for row in rows:
+            row.pop("__type", None)
+            latest[row["inst_id"]] = row
+        values = list(latest.values())
+        stmt = pg_insert(OrderBookSyncState).values(values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["inst_id"],
+            set_={
+                "prev_seq": stmt.excluded.prev_seq,
+                "latest_seq": stmt.excluded.latest_seq,
+                "latest_ts": stmt.excluded.latest_ts,
+                "resync_count": stmt.excluded.resync_count,
+                "last_resync_reason": stmt.excluded.last_resync_reason,
+                "status": stmt.excluded.status,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except Exception as e:
+            logger.error("OrderBookWriter sync_state flush failed: %s", e)
 
 
 class MarketDataWriter(BaseWriter):
@@ -258,6 +301,7 @@ class TradeWriter(BaseWriter):
     def __init__(self):
         super().__init__()
         self.engine = get_engine()
+        self.conflicts = DataConflictDetector()
 
     def _flush(self, batch: List[dict]) -> None:
         from ..models import Trade
@@ -268,19 +312,23 @@ class TradeWriter(BaseWriter):
         rows = [self._normalize(b) for b in batch]
         if not rows:
             return
+
+        # Raw 数据不可静默覆盖：同键不同 payload 登记 DATA_CONFLICT
+        try:
+            rows, conflicts = self.conflicts.detect_trades(rows)
+            if conflicts:
+                logger.error(
+                    "TradeWriter 检测到 %d 条 DATA_CONFLICT，已登记并跳过", len(conflicts)
+                )
+        except Exception as e:
+            logger.error("TradeWriter conflict detection failed: %s", e)
+
+        if not rows:
+            return
+
         stmt = pg_insert(Trade).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["inst_id", "trade_id", "ts"],
-            set_={
-                "px": stmt.excluded.px,
-                "sz": stmt.excluded.sz,
-                "side": stmt.excluded.side,
-                "source": stmt.excluded.source,
-                "received_at": stmt.excluded.received_at,
-                "ingested_at": stmt.excluded.ingested_at,
-                "raw_json": stmt.excluded.raw_json,
-                "raw_hash": stmt.excluded.raw_hash,
-            },
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["inst_id", "trade_id", "ts"]
         )
         try:
             with self.engine.begin() as conn:
@@ -291,9 +339,7 @@ class TradeWriter(BaseWriter):
 
     def _normalize(self, item: dict) -> dict:
         raw = item.get("raw_json", item)
-        raw_hash = hashlib.sha256(
-            json.dumps(raw, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        ).hexdigest()
+        raw_hash = canonical_hash(raw)
         return {
             "inst_id": item["inst_id"],
             "trade_id": item["trade_id"],
