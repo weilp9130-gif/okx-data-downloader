@@ -119,6 +119,7 @@ def init_db() -> None:
         MarketDataProvenance,
         OpenInterest,
         OISyncState,
+        OpenInterestRealtime,
         OrderBookFactor,
         OrderBookSnapshot,
         OrderBookSyncState,
@@ -181,6 +182,11 @@ def _create_hypertables(engine: Engine) -> None:
             ))
             conn.execute(text(
                 "SELECT create_hypertable('trade_aggregates', 'ts', "
+                "chunk_time_interval => INTERVAL '2 weeks', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('open_interest_realtime', 'ts', "
                 "chunk_time_interval => INTERVAL '2 weeks', "
                 "if_not_exists => TRUE, migrate_data => TRUE)"
             ))

@@ -194,6 +194,25 @@ python sync_realtime.py --insts BTC-USDT-SWAP --channels orderbook
 python sync_realtime.py --insts BTC-USDT-SWAP --channels trades,orderbook
 ```
 
+### 2.6 WebSocket 市场数据（Phase 7：OI / Funding / Mark / Index）
+
+```bash
+# 实时持仓量（写入 open_interest_realtime）
+python sync_realtime.py --insts BTC-USDT-SWAP --channels oi
+
+# 资金费率（写入 funding_rates）
+python sync_realtime.py --insts BTC-USDT-SWAP --channels funding
+
+# 标记价格 tick（写入 mark_prices, bar='realtime'）
+python sync_realtime.py --insts BTC-USDT-SWAP --channels mark
+
+# 指数价格 tick（写入 index_prices, bar='realtime'，指数用 BTC-USDT）
+python sync_realtime.py --insts BTC-USDT --channels index
+
+# 组合订阅
+python sync_realtime.py --insts BTC-USDT-SWAP --channels oi,funding,mark
+```
+
 ### 2.2 数据质量报告（Phase 3）
 
 `quality_report.py` 对入库数据进行三层质量验证：

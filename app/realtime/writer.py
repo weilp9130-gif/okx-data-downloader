@@ -143,6 +143,115 @@ class OrderBookWriter(BaseWriter):
             logger.error("OrderBookWriter flush failed: %s", e)
 
 
+class MarketDataWriter(BaseWriter):
+    """WebSocket 市场数据写入器（OI / Funding / Mark / Index / Kline）
+
+    接收 MarketDataHandler 产出的 {target, record} 项，按目标表分别写入。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.engine = get_engine()
+
+    def _flush(self, batch: List[dict]) -> None:
+        if not batch:
+            return
+        grouped: dict = {}
+        for item in batch:
+            target = item.get("__target")
+            record = item.get("record")
+            if not target or not record:
+                continue
+            grouped.setdefault(target, []).append(record)
+
+        for target, rows in grouped.items():
+            try:
+                self._flush_target(target, rows)
+            except Exception as e:
+                logger.error("MarketDataWriter flush failed: target=%s | %s", target, e)
+
+    def _flush_target(self, target: str, rows: List[dict]) -> None:
+        if target == "open_interest_realtime":
+            from ..models import OpenInterestRealtime
+            stmt = pg_insert(OpenInterestRealtime).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["inst_id", "ts"],
+                set_={
+                    "oi": stmt.excluded.oi,
+                    "oi_ccy": stmt.excluded.oi_ccy,
+                    "oi_usd": stmt.excluded.oi_usd,
+                    "raw_json": stmt.excluded.raw_json,
+                    "received_at": stmt.excluded.received_at,
+                    "ingested_at": stmt.excluded.ingested_at,
+                },
+            )
+        elif target == "funding_rates":
+            from ..models import FundingRate
+            stmt = pg_insert(FundingRate).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["inst_id", "ts"],
+                set_={
+                    "funding_rate": stmt.excluded.funding_rate,
+                    "realized_rate": stmt.excluded.realized_rate,
+                    "funding_time": stmt.excluded.funding_time,
+                },
+            )
+        elif target == "mark_prices":
+            from ..models import MarkPrice
+            stmt = pg_insert(MarkPrice).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["inst_id", "bar", "ts"],
+                set_={
+                    "o": stmt.excluded.o,
+                    "h": stmt.excluded.h,
+                    "l": stmt.excluded.l,
+                    "c": stmt.excluded.c,
+                    "source": stmt.excluded.source,
+                    "received_at": stmt.excluded.received_at,
+                    "fetched_at": stmt.excluded.fetched_at,
+                    "raw_json": stmt.excluded.raw_json,
+                    "ingested_at": stmt.excluded.ingested_at,
+                },
+            )
+        elif target == "index_prices":
+            from ..models import IndexPrice
+            stmt = pg_insert(IndexPrice).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["inst_id", "bar", "ts"],
+                set_={
+                    "o": stmt.excluded.o,
+                    "h": stmt.excluded.h,
+                    "l": stmt.excluded.l,
+                    "c": stmt.excluded.c,
+                    "source": stmt.excluded.source,
+                    "received_at": stmt.excluded.received_at,
+                    "fetched_at": stmt.excluded.fetched_at,
+                    "raw_json": stmt.excluded.raw_json,
+                    "ingested_at": stmt.excluded.ingested_at,
+                },
+            )
+        elif target == "candles":
+            from ..models import Candle
+            stmt = pg_insert(Candle).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["inst_id", "bar", "ts"],
+                set_={
+                    "o": stmt.excluded.o,
+                    "h": stmt.excluded.h,
+                    "l": stmt.excluded.l,
+                    "c": stmt.excluded.c,
+                    "vol": stmt.excluded.vol,
+                },
+            )
+        else:
+            logger.warning("MarketDataWriter unknown target: %s", target)
+            return
+
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+        logger.info("MarketDataWriter flushed %d rows -> %s", len(rows), target)
+
+
 class TradeWriter(BaseWriter):
     """Trade 实时写入器"""
 

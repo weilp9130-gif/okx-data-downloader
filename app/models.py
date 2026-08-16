@@ -321,6 +321,34 @@ class OpenInterest(Base):
         return f"<OpenInterest(inst={self.inst_id}, bar={self.bar}, ts={self.ts}, oi={self.oi})>"
 
 
+class OpenInterestRealtime(Base):
+    """WebSocket 实时持仓量观测值
+
+    Phase 7 创建：由 WS open-interest 频道写入，语义为实时观测值，
+    非 REST 历史 OI 的另一种存储。
+    """
+
+    __tablename__ = "open_interest_realtime"
+
+    inst_id = Column(String(50), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    oi = Column(Numeric(30, 16))
+    oi_ccy = Column(Numeric(30, 16))
+    oi_usd = Column(Numeric(30, 16))
+    raw_json = Column(JSONB)
+    received_at = Column(DateTime(timezone=True))
+    ingested_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "ts"),
+        Index("ix_oir_inst_ts", "inst_id", "ts"),
+        Index("ix_oir_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OpenInterestRealtime(inst={self.inst_id}, ts={self.ts}, oi={self.oi})>"
+
+
 class MarkPrice(Base):
     """标记价格 K线"""
 

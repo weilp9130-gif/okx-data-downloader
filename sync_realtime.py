@@ -33,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--channels",
         default="trades",
-        help="订阅频道，逗号分隔，默认 trades，可选 trades/orderbook",
+        help="订阅频道，逗号分隔。可选: trades/orderbook/oi/funding/mark/index/kline",
     )
     return parser
 
