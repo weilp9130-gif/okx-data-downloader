@@ -157,6 +157,87 @@ class Trade(Base):
         return f"<Trade(inst={self.inst_id}, trade_id={self.trade_id}, ts={self.ts})>"
 
 
+class OrderBookSnapshot(Base):
+    """本地重建 OrderBook 采样快照（Derived / Reconstructed）
+
+    注意：这不是 Raw Exchange Data，而是本地重建盘口在固定采样点的状态。
+    """
+
+    __tablename__ = "order_book_snapshots"
+
+    inst_id = Column(String(50), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    exchange_ts = Column(DateTime(timezone=True), nullable=False)
+    snapshot_at = Column(DateTime(timezone=True), nullable=False)
+    received_at = Column(DateTime(timezone=True))
+    fetched_at = Column(DateTime(timezone=True))
+    bids = Column(JSONB)
+    asks = Column(JSONB)
+    best_bid_px = Column(Numeric(20, 8))
+    best_bid_sz = Column(Numeric(30, 16))
+    best_ask_px = Column(Numeric(20, 8))
+    best_ask_sz = Column(Numeric(30, 16))
+    seq_id = Column(BigInteger)
+    prev_seq_id = Column(BigInteger)
+    checksum = Column(Integer)
+    source = Column(String(20))
+    snapshot_type = Column(String(20))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "snapshot_at"),
+        Index("ix_ob_inst_snapshot", "inst_id", "snapshot_at"),
+        Index("ix_ob_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OrderBookSnapshot(inst={self.inst_id}, ts={self.ts}, snapshot_at={self.snapshot_at})>"
+
+
+class OrderBookFactor(Base):
+    """OrderBook 因子（spread / mid / wmid / imbalance 等）"""
+
+    __tablename__ = "order_book_factors"
+
+    inst_id = Column(String(50), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    spread = Column(Numeric(20, 8))
+    mid = Column(Numeric(20, 8))
+    wmid = Column(Numeric(20, 8))
+    bid_depth_5 = Column(Numeric(30, 16))
+    ask_depth_5 = Column(Numeric(30, 16))
+    bid_depth_10 = Column(Numeric(30, 16))
+    ask_depth_10 = Column(Numeric(30, 16))
+    imbalance_5 = Column(Numeric(20, 8))
+    imbalance_10 = Column(Numeric(20, 8))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "ts"),
+        Index("ix_obf_inst_ts", "inst_id", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OrderBookFactor(inst={self.inst_id}, ts={self.ts})>"
+
+
+class OrderBookSyncState(Base):
+    """OrderBook 同步状态"""
+
+    __tablename__ = "order_book_sync_state"
+
+    inst_id = Column(String(50), primary_key=True)
+    prev_seq = Column(BigInteger)
+    latest_seq = Column(BigInteger)
+    checksum = Column(Integer)
+    latest_ts = Column(DateTime(timezone=True))
+    resync_count = Column(Integer, default=0)
+    last_resync_reason = Column(String(40))
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    def __repr__(self) -> str:
+        return f"<OrderBookSyncState(inst={self.inst_id}, status={self.status})>"
+
+
 class TradeAggregate(Base):
     """Trade 聚合数据（1s / 1m 等时间桶）
 

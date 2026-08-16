@@ -184,6 +184,16 @@ python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1m --start
 python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1s --start 2026-08-16 --end 2026-08-17
 ```
 
+### 2.5 WebSocket OrderBook（Phase 6）
+
+```bash
+# 实时采集 OrderBook 快照（写入 order_book_snapshots）
+python sync_realtime.py --insts BTC-USDT-SWAP --channels orderbook
+
+# 同时采集 trades + orderbook
+python sync_realtime.py --insts BTC-USDT-SWAP --channels trades,orderbook
+```
+
 ### 2.2 数据质量报告（Phase 3）
 
 `quality_report.py` 对入库数据进行三层质量验证：

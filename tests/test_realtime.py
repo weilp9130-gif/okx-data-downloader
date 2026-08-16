@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 
 from app.realtime.okx_ws import OKXWebSocketClient
+from app.realtime.orderbook import OrderBookHandler, OrderBookState
 from app.realtime.trades import TradesRealtimeHandler
 from app.realtime.writer import TradeWriter
 
@@ -63,6 +64,95 @@ class TestOKXWebSocketClient(unittest.TestCase):
     def test_client_init(self):
         client = OKXWebSocketClient()
         self.assertEqual(client.url, "wss://ws.okx.com:8443/ws/v5/public")
+
+
+class TestOrderBookState(unittest.TestCase):
+    def test_apply_snapshot(self):
+        state = OrderBookState("BTC-USDT-SWAP")
+        state.apply_snapshot({
+            "instId": "BTC-USDT-SWAP",
+            "bids": [["63000", "1"], ["62999", "2"]],
+            "asks": [["63001", "1"], ["63002", "2"]],
+            "ts": "1786862438257",
+            "seqId": "100",
+            "prevSeqId": "99",
+        })
+        self.assertEqual(state.state, "RUNNING")
+        self.assertEqual(state.seq_id, 100)
+        self.assertEqual(state.best_bid()[0], "63000")
+        self.assertEqual(state.best_ask()[0], "63001")
+
+    def test_apply_update(self):
+        state = OrderBookState("BTC-USDT-SWAP")
+        state.apply_snapshot({
+            "instId": "BTC-USDT-SWAP",
+            "bids": [["63000", "1"], ["62998", "1"]],
+            "asks": [["63001", "1"], ["63002", "1"]],
+            "ts": "1786862438257",
+            "seqId": "100",
+            "prevSeqId": "99",
+        })
+        ok = state.apply_update({
+            "instId": "BTC-USDT-SWAP",
+            "bids": [["62999", "2"]],
+            "asks": [["63001", "0"]],
+            "ts": "1786862439000",
+            "seqId": "101",
+            "prevSeqId": "100",
+        })
+        self.assertTrue(ok)
+        self.assertEqual(state.seq_id, 101)
+        self.assertEqual(state.best_bid()[0], "63000")  # 63000 仍优于 62999
+        self.assertEqual(state.best_ask()[0], "63002")  # 原来的第二档
+
+    def test_gap_detection(self):
+        state = OrderBookState("BTC-USDT-SWAP")
+        state.apply_snapshot({
+            "instId": "BTC-USDT-SWAP",
+            "bids": [["63000", "1"]],
+            "asks": [["63001", "1"]],
+            "ts": "1786862438257",
+            "seqId": "100",
+            "prevSeqId": "99",
+        })
+        ok = state.apply_update({
+            "instId": "BTC-USDT-SWAP",
+            "bids": [],
+            "asks": [],
+            "ts": "1786862439000",
+            "seqId": "103",
+            "prevSeqId": "102",
+        })
+        self.assertFalse(ok)
+        self.assertEqual(state.state, "GAP_DETECTED")
+
+
+class TestOrderBookHandler(unittest.TestCase):
+    def test_handle_snapshot(self):
+        handler = OrderBookHandler("BTC-USDT-SWAP", channel="books")
+        record = handler.handle({
+            "arg": {"channel": "books", "instId": "BTC-USDT-SWAP"},
+            "action": "snapshot",
+            "data": [{
+                "instId": "BTC-USDT-SWAP",
+                "bids": [["63000", "1"]],
+                "asks": [["63001", "1"]],
+                "ts": "1786862438257",
+                "seqId": "100",
+                "prevSeqId": "99",
+            }],
+        })
+        self.assertIsNotNone(record)
+        self.assertEqual(record["snapshot_type"], "INITIAL")
+        self.assertEqual(handler.state.state, "RUNNING")
+
+    def test_ignore_other_channel(self):
+        handler = OrderBookHandler("BTC-USDT-SWAP")
+        record = handler.handle({
+            "arg": {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+            "data": [{}],
+        })
+        self.assertIsNone(record)
 
 
 class TestTradeWriter(unittest.TestCase):

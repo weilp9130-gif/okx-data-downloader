@@ -30,6 +30,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="运行时长（秒），默认 0 = 无限",
     )
+    parser.add_argument(
+        "--channels",
+        default="trades",
+        help="订阅频道，逗号分隔，默认 trades，可选 trades/orderbook",
+    )
     return parser
 
 
@@ -40,7 +45,8 @@ def main() -> int:
     init_db()
 
     inst_ids = [i.strip() for i in args.insts.split(",")]
-    manager = RealtimeManager(inst_ids=inst_ids)
+    channels = [c.strip() for c in args.channels.split(",")]
+    manager = RealtimeManager(inst_ids=inst_ids, channels=channels)
 
     shutdown = False
 

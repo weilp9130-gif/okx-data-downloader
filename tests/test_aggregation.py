@@ -6,6 +6,24 @@ from datetime import datetime, timezone
 from app.aggregation.trades import TradeAggregator
 
 
+class TestOrderBookFactorCalculator(unittest.TestCase):
+    def test_calculate(self):
+        from app.aggregation.orderbook import OrderBookFactorCalculator
+        bids = [["63000", "10"], ["62990", "5"]]
+        asks = [["63001", "8"], ["63002", "3"]]
+        factors = OrderBookFactorCalculator.calculate(bids, asks)
+        self.assertIsNotNone(factors)
+        self.assertGreater(factors["spread"], 0)
+        self.assertAlmostEqual(factors["mid"], 63000.5)
+        self.assertEqual(factors["bid_depth_5"], 15.0)
+        self.assertEqual(factors["ask_depth_5"], 11.0)
+        self.assertIn("imbalance_5", factors)
+
+    def test_calculate_empty(self):
+        from app.aggregation.orderbook import OrderBookFactorCalculator
+        self.assertIsNone(OrderBookFactorCalculator.calculate([], []))
+
+
 class TestTradeAggregator(unittest.TestCase):
     def test_aggregate_empty(self):
         agg = TradeAggregator()

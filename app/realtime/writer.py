@@ -87,6 +87,69 @@ import time as _time_module
 import time as _time_ref
 
 
+class OrderBookWriter(BaseWriter):
+    """OrderBook 快照写入器"""
+
+    def __init__(self):
+        super().__init__()
+        self.engine = get_engine()
+
+    def _flush(self, batch: List[dict]) -> None:
+        from ..models import OrderBookSnapshot, OrderBookFactor
+
+        if not batch:
+            return
+        snapshot_rows = [b for b in batch if b.get("__type") == "snapshot"]
+        factor_rows = [b for b in batch if b.get("__type") == "factor"]
+        try:
+            if snapshot_rows:
+                for row in snapshot_rows:
+                    row.pop("__type", None)
+                stmt = pg_insert(OrderBookSnapshot).values(snapshot_rows)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["inst_id", "snapshot_at"],
+                    set_={
+                        "bids": stmt.excluded.bids,
+                        "asks": stmt.excluded.asks,
+                        "best_bid_px": stmt.excluded.best_bid_px,
+                        "best_bid_sz": stmt.excluded.best_bid_sz,
+                        "best_ask_px": stmt.excluded.best_ask_px,
+                        "best_ask_sz": stmt.excluded.best_ask_sz,
+                        "seq_id": stmt.excluded.seq_id,
+                        "prev_seq_id": stmt.excluded.prev_seq_id,
+                        "checksum": stmt.excluded.checksum,
+                        "source": stmt.excluded.source,
+                        "snapshot_type": stmt.excluded.snapshot_type,
+                    },
+                )
+                with self.engine.begin() as conn:
+                    conn.execute(stmt)
+                logger.info("OrderBookWriter flushed %d snapshots", len(snapshot_rows))
+            if factor_rows:
+                for row in factor_rows:
+                    row.pop("__type", None)
+                stmt = pg_insert(OrderBookFactor).values(factor_rows)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["inst_id", "ts"],
+                    set_={
+                        "spread": stmt.excluded.spread,
+                        "mid": stmt.excluded.mid,
+                        "wmid": stmt.excluded.wmid,
+                        "bid_depth_5": stmt.excluded.bid_depth_5,
+                        "ask_depth_5": stmt.excluded.ask_depth_5,
+                        "bid_depth_10": stmt.excluded.bid_depth_10,
+                        "ask_depth_10": stmt.excluded.ask_depth_10,
+                        "imbalance_5": stmt.excluded.imbalance_5,
+                        "imbalance_10": stmt.excluded.imbalance_10,
+                    },
+                )
+                with self.engine.begin() as conn:
+                    conn.execute(stmt)
+                logger.info("OrderBookWriter flushed %d factors", len(factor_rows))
+        except Exception as e:
+            logger.error("OrderBookWriter flush failed: %s", e)
+
+
 class TradeWriter(BaseWriter):
     """Trade 实时写入器"""
 
@@ -139,6 +202,7 @@ class TradeWriter(BaseWriter):
             "source": "WS",
             "received_at": item.get("received_at"),
             "ingested_at": datetime.now(timezone.utc),
+            "fill_time": item["ts"],
             "raw_json": raw,
             "raw_hash": raw_hash,
         }
