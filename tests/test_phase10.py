@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from app.conflict import DataConflictDetector, canonical_hash
+from app.conflict import DataConflictDetector, canonical_hash, trade_core_hash
 from app.realtime.orderbook import (
     ORDERBOOK_CHANNELS,
     OrderBookHandler,
@@ -105,6 +105,21 @@ class TestCanonicalHash(unittest.TestCase):
         a = {"tradeId": "1", "px": "100"}
         b = {"tradeId": "1", "px": "101"}
         self.assertNotEqual(canonical_hash(a), canonical_hash(b))
+
+    def test_ws_rest_transport_fields_ignored(self):
+        """回归：WS 与 REST 同一成交的 payload 在传输元数据（seqId/count）上
+        必然不同，核心字段 hash 必须一致，避免 DATA_CONFLICT 误报。"""
+        ws = {
+            "instId": "BTC-USDT-SWAP", "tradeId": "1", "px": "100",
+            "sz": "1", "side": "buy", "ts": "1786800000000",
+            "count": "1", "seqId": 334181011765, "source": "0",
+        }
+        rest = {
+            "instId": "BTC-USDT-SWAP", "tradeId": "1", "px": "100",
+            "sz": "1", "side": "buy", "ts": "1786800000000", "source": "0",
+        }
+        self.assertEqual(trade_core_hash(ws), trade_core_hash(rest))
+        self.assertNotEqual(canonical_hash(ws), canonical_hash(rest))
 
 
 class TestDataConflictDetector(unittest.TestCase):

@@ -54,8 +54,8 @@ def parse_date(date_str: str) -> datetime:
 
     支持格式：
         - '2024-01-01'
-        - '2024-01-01 12:30:00'
-        - '2024-01-01T12:30:00Z'
+        - '2024-01-01 12:30' / '2024-01-01T12:30'
+        - '2024-01-01 12:30:00' / '2024-01-01T12:30:00Z'
 
     Args:
         date_str: 日期字符串
@@ -66,6 +66,8 @@ def parse_date(date_str: str) -> datetime:
     date_str = date_str.strip().replace("Z", "").replace("T", " ")
     if len(date_str) == 10:
         fmt = "%Y-%m-%d"
+    elif len(date_str) == 16:
+        fmt = "%Y-%m-%d %H:%M"
     elif len(date_str) == 19:
         fmt = "%Y-%m-%d %H:%M:%S"
     else:

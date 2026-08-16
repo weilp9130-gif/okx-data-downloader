@@ -12,7 +12,7 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..conflict import DataConflictDetector, canonical_hash
+from ..conflict import DataConflictDetector, trade_core_hash
 from ..database import get_engine
 from ..utils.logger import get_logger
 
@@ -372,7 +372,7 @@ class TradeWriter(BaseWriter):
 
     def _normalize(self, item: dict) -> dict:
         raw = item.get("raw_json", item)
-        raw_hash = canonical_hash(raw)
+        raw_hash = trade_core_hash(raw)
         return {
             "inst_id": item["inst_id"],
             "trade_id": item["trade_id"],

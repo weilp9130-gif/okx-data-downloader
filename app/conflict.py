@@ -21,12 +21,23 @@ logger = get_logger(__name__)
 CONFLICT_STATUS_OPEN = "OPEN"
 CONFLICT_STATUS_RESOLVED = "RESOLVED"
 
+# trades 的核心业务字段：REST 与 WS 两条链路的 payload 在传输元数据
+# （seqId / count 等）上必然不同，但这些字段不代表成交本身。
+# hash 只基于核心字段，避免 REST 回填与 WS 实时写入被误判为冲突。
+TRADE_CORE_FIELDS = ("instId", "tradeId", "px", "sz", "side", "ts")
+
 
 def canonical_hash(payload: dict) -> str:
     """计算 canonical raw_json 的 SHA256"""
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+
+
+def trade_core_hash(payload: dict) -> str:
+    """基于成交核心字段计算 hash（忽略 WS/REST 传输元数据）"""
+    core = {k: payload[k] for k in TRADE_CORE_FIELDS if k in payload}
+    return canonical_hash(core)
 
 
 class DataConflictDetector:

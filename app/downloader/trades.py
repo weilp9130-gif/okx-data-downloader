@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..config import Config
-from ..conflict import DataConflictDetector, canonical_hash
+from ..conflict import DataConflictDetector, trade_core_hash
 from ..database import get_engine
 from ..models import Trade, TradesSyncState
 from ..okx_client import OKXClient
@@ -111,7 +111,7 @@ class TradesDownloader:
     def _normalize(self, raw: dict, inst_id: str) -> dict:
         ts = ms_to_datetime(int(raw["ts"]))
         raw_json = raw
-        raw_hash = canonical_hash(raw_json)
+        raw_hash = trade_core_hash(raw_json)
         return {
             "inst_id": inst_id,
             "trade_id": raw["tradeId"],
