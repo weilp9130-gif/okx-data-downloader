@@ -11,5 +11,8 @@ python-dotenv>=1.0.0
 # HTTP请求 (调用OKX公开API)
 requests>=2.28.0
 
+# WebSocket 实时采集
+websockets>=12.0
+
 # 时间处理
 tzdata>=2024.1

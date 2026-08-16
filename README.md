@@ -159,6 +159,21 @@ python backfill.py --type oi --inst BTC-USDT-SWAP
 python backfill.py --type trades --inst BTC-USDT-SWAP --max-pages 5
 ```
 
+### 2.3 WebSocket 实时采集（Phase 4：仅 Trades）
+
+`sync_realtime.py` 订阅 OKX WebSocket `trades` 频道，启动时基于数据库最新 `trade_id` 执行 ID-based Recovery，随后持续接收实时成交并幂等入库。
+
+```bash
+# 实时采集 BTC-USDT-SWAP 成交，默认一直运行
+python sync_realtime.py --insts BTC-USDT-SWAP
+
+# 运行 60 秒后自动停止（测试用）
+python sync_realtime.py --insts BTC-USDT-SWAP --duration 60
+
+# 多合约
+python sync_realtime.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
+```
+
 ### 2.2 数据质量报告（Phase 3）
 
 `quality_report.py` 对入库数据进行三层质量验证：

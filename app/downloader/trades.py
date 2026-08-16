@@ -31,6 +31,7 @@ class TradesDownloader:
         end: Optional[datetime] = None,
         limit: int = 100,
         max_pages: int = 10,
+        after_trade_id: Optional[str] = None,
     ) -> int:
         """下载指定时间范围的 trades
 
@@ -39,6 +40,8 @@ class TradesDownloader:
             start: 开始时间（UTC），默认一年前
             end: 结束时间（UTC），默认当前
             limit: 每页数量
+            max_pages: 最大分页数
+            after_trade_id: 从此 tradeId 之后开始获取（用于断线恢复）
 
         Returns:
             int: 写入数量
@@ -53,7 +56,7 @@ class TradesDownloader:
         end_ms = int(end.timestamp() * 1000)
 
         records: List[Dict] = []
-        after = None
+        after = after_trade_id
         page_count = 0
         duplicate_count = 0
         first_trade_id = None
