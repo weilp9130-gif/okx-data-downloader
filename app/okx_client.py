@@ -280,7 +280,7 @@ class OKXClient:
         import socket
         is_conn_err = isinstance(
             last_exc,
-            (requests.ConnectionError, requests.ProxyError, socket.gaierror),
+            (requests.ConnectionError, requests.exceptions.ProxyError, socket.gaierror),
         )
         hint = ""
         if is_conn_err:
@@ -453,17 +453,156 @@ class OKXClient:
     # ------------------------------------------------------------------
     # 交易对信息
     # ------------------------------------------------------------------
-    def get_instruments(self, inst_type: str = "SWAP") -> List[dict]:
+    # ------------------------------------------------------------------
+    # Open Interest
+    # ------------------------------------------------------------------
+    def get_open_interest(self, inst_id: str) -> List[dict]:
+        """获取当前持仓量快照
+
+        Args:
+            inst_id: 产品ID，如 BTC-USDT-SWAP
+
+        Returns:
+            List[dict]: 持仓量数据列表
+        """
+        return self._get("/api/v5/public/open-interest", {"instId": inst_id})
+
+    # ------------------------------------------------------------------
+    # 历史成交明细
+    # ------------------------------------------------------------------
+    def get_history_trades(
+        self,
+        inst_id: str,
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        limit: int = 100,
+        type_: str = "1",
+    ) -> List[dict]:
+        """获取历史成交明细
+
+        OKX 默认按 tradeId 降序返回（最新在前）。
+        type=1：按 tradeId 分页；after 获取更旧数据。
+
+        Args:
+            inst_id: 产品ID
+            after: 返回更早于该 tradeId 的数据
+            before: 返回更新于该 tradeId 的数据
+            limit: 最大 100
+            type_: 分页类型，默认 "1"（按 tradeId）
+
+        Returns:
+            List[dict]: 成交明细列表
+        """
+        params = {
+            "instId": inst_id,
+            "limit": str(min(limit, 100)),
+            "type": type_,
+        }
+        if after:
+            params["after"] = str(after)
+        if before:
+            params["before"] = str(before)
+
+        return self._get("/api/v5/market/history-trades", params)
+
+    # ------------------------------------------------------------------
+    # 标记价格 / 指数价格 K线
+    # ------------------------------------------------------------------
+    def get_mark_price_candles(
+        self,
+        inst_id: str,
+        bar: str = "1D",
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[dict]:
+        """获取标记价格K线
+
+        返回数组格式: [ts, o, h, l, c, confirm]
+        """
+        params = {
+            "instId": inst_id,
+            "bar": bar,
+            "limit": str(min(limit, 100)),
+        }
+        if after:
+            params["after"] = str(after)
+        if before:
+            params["before"] = str(before)
+        data = self._get("/api/v5/market/mark-price-candles", params)
+        return self._parse_array_candles(data)
+
+    def get_index_candles(
+        self,
+        inst_id: str,
+        bar: str = "1D",
+        after: Optional[int] = None,
+        before: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[dict]:
+        """获取指数价格K线
+
+        返回数组格式: [ts, o, h, l, c, confirm]
+        """
+        params = {
+            "instId": inst_id,
+            "bar": bar,
+            "limit": str(min(limit, 100)),
+        }
+        if after:
+            params["after"] = str(after)
+        if before:
+            params["before"] = str(before)
+        data = self._get("/api/v5/market/index-candles", params)
+        return self._parse_array_candles(data)
+
+    @staticmethod
+    def _parse_array_candles(data: List[list]) -> List[dict]:
+        """解析OKX数组格式K线为字典列表
+
+        字段: [ts, o, h, l, c, confirm]
+        """
+        candles = []
+        for d in data:
+            candles.append({
+                "ts": int(d[0]),
+                "o": d[1],
+                "h": d[2],
+                "l": d[3],
+                "c": d[4],
+                "confirm": d[5] if len(d) > 5 else None,
+            })
+        return candles
+
+    # ------------------------------------------------------------------
+    # 交易对信息
+    # ------------------------------------------------------------------
+    def get_instruments(
+        self,
+        inst_type: str = "SWAP",
+        inst_id: Optional[str] = None,
+        inst_family: Optional[str] = None,
+        uly: Optional[str] = None,
+    ) -> List[dict]:
         """获取交易对列表
 
         Args:
-            inst_type: SPOT / SWAP / FUTURES / OPTION
+            inst_type: SPOT / SWAP / FUTURES / OPTION / MARGIN
+            inst_id: 产品ID，如 BTC-USDT-SWAP（可选，精确匹配）
+            inst_family: 交易品种Family，如 BTC-USDT（可选）
+            uly: 标的指数，如 BTC-USDT（可选）
 
         Returns:
             List[dict]: 交易对信息列表
         """
-        data = self._get("/api/v5/public/instruments", {"instType": inst_type})
-        return data
+        params = {"instType": inst_type}
+        if inst_id:
+            params["instId"] = inst_id
+        if inst_family:
+            params["instFamily"] = inst_family
+        if uly:
+            params["uly"] = uly
+        return self._get("/api/v5/public/instruments", params)
 
     # ------------------------------------------------------------------
     # 当前实时资金费率

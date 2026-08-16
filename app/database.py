@@ -106,7 +106,21 @@ def session_scope() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     """初始化数据库：创建所有表和TimescaleDB hypertable"""
-    from .models import Candle, FundingRate  # 导入以注册模型
+    from .models import (  # 导入以注册模型
+        Candle,
+        FundingRate,
+        IndexPrice,
+        Instrument,
+        MarkPrice,
+        MarketDataProvenance,
+        OpenInterest,
+        Trade,
+        FundingSyncState,
+        IndexPriceSyncState,
+        MarkPriceSyncState,
+        OISyncState,
+        TradesSyncState,
+    )
 
     engine = get_engine()
     Base.metadata.create_all(bind=engine)
@@ -137,6 +151,27 @@ def _create_hypertables(engine: Engine) -> None:
             conn.execute(text(
                 "SELECT create_hypertable('funding_rates', 'ts', "
                 "chunk_time_interval => INTERVAL '2 weeks', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            # Phase 2 新增 hypertable
+            conn.execute(text(
+                "SELECT create_hypertable('open_interest', 'ts', "
+                "chunk_time_interval => INTERVAL '2 weeks', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('mark_prices', 'ts', "
+                "chunk_time_interval => INTERVAL '2 weeks', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('index_prices', 'ts', "
+                "chunk_time_interval => INTERVAL '2 weeks', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('trades', 'ts', "
+                "chunk_time_interval => INTERVAL '1 week', "
                 "if_not_exists => TRUE, migrate_data => TRUE)"
             ))
             conn.commit()

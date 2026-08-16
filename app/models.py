@@ -8,13 +8,16 @@
 """
 
 from sqlalchemy import (
+    BigInteger,
     Column,
-    String,
     DateTime,
+    Index,
+    Integer,
     Numeric,
     PrimaryKeyConstraint,
-    Index,
+    String,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 from .database import Base
 
@@ -119,3 +122,289 @@ class DownloadState(Base):
             f"<DownloadState(inst={self.inst_id}, bar={self.bar}, "
             f"verified_upto={self.verified_upto})>"
         )
+
+
+class Trade(Base):
+    """成交明细（Raw Exchange Data）
+
+    业务唯一键经真实 API 验证为 (inst_id, trade_id)。
+    OKX SWAP/FUTURES 的 sz 单位为合约张数，非 BTC/USDT 数量。
+    """
+
+    __tablename__ = "trades"
+
+    inst_id = Column(String(50), nullable=False)
+    trade_id = Column(String(80), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    px = Column(Numeric(20, 8), nullable=False)
+    sz = Column(Numeric(30, 16), nullable=False)
+    side = Column(String(10), nullable=False)
+    source = Column(String(20))
+    received_at = Column(DateTime(timezone=True))
+    fetched_at = Column(DateTime(timezone=True))
+    ingested_at = Column(DateTime(timezone=True), nullable=False)
+    fill_time = Column(DateTime(timezone=True))
+    raw_json = Column(JSONB)
+    raw_hash = Column(String(64))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "trade_id", "ts"),
+        Index("ix_trades_inst_ts", "inst_id", "ts"),
+        Index("ix_trades_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Trade(inst={self.inst_id}, trade_id={self.trade_id}, ts={self.ts})>"
+
+
+class TradesSyncState(Base):
+    """Trades 同步状态"""
+
+    __tablename__ = "trades_sync_state"
+
+    inst_id = Column(String(50), primary_key=True)
+    latest_trade_id = Column(String(80))
+    latest_ts = Column(DateTime(timezone=True))
+    status = Column(String(20))
+    recovery_count = Column(Integer, default=0)
+    last_recovery_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    updated_at = Column(DateTime(timezone=True))
+
+    def __repr__(self) -> str:
+        return f"<TradesSyncState(inst={self.inst_id}, status={self.status})>"
+
+
+class OpenInterest(Base):
+    """持仓量（Open Interest）
+
+    注意：OKX 当前仅提供 `/api/v5/public/open-interest` 单点快照接口，
+    无历史 OI 查询端点。本表用于聚合该快照的时序数据，bar 通常为
+    采集周期或统一标记（如 "current"）。
+    """
+
+    __tablename__ = "open_interest"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    oi = Column(Numeric(30, 16), nullable=False)
+    oi_ccy = Column(Numeric(30, 16))
+    oi_usd = Column(Numeric(30, 16))
+    raw_json = Column(JSONB)
+    ingested_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar", "ts"),
+        Index("ix_oi_inst_ts", "inst_id", "ts"),
+        Index("ix_oi_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OpenInterest(inst={self.inst_id}, bar={self.bar}, ts={self.ts}, oi={self.oi})>"
+
+
+class MarkPrice(Base):
+    """标记价格 K线"""
+
+    __tablename__ = "mark_prices"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    o = Column(Numeric(20, 8), nullable=False)
+    h = Column(Numeric(20, 8), nullable=False)
+    l = Column(Numeric(20, 8), nullable=False)
+    c = Column(Numeric(20, 8), nullable=False)
+    confirm = Column(String(10))
+    source = Column(String(20))
+    received_at = Column(DateTime(timezone=True))
+    fetched_at = Column(DateTime(timezone=True))
+    raw_json = Column(JSONB)
+    ingested_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar", "ts"),
+        Index("ix_mp_inst_ts", "inst_id", "ts"),
+        Index("ix_mp_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarkPrice(inst={self.inst_id}, bar={self.bar}, ts={self.ts}, c={self.c})>"
+
+
+class IndexPrice(Base):
+    """指数价格 K线"""
+
+    __tablename__ = "index_prices"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    o = Column(Numeric(20, 8), nullable=False)
+    h = Column(Numeric(20, 8), nullable=False)
+    l = Column(Numeric(20, 8), nullable=False)
+    c = Column(Numeric(20, 8), nullable=False)
+    confirm = Column(String(10))
+    source = Column(String(20))
+    received_at = Column(DateTime(timezone=True))
+    fetched_at = Column(DateTime(timezone=True))
+    raw_json = Column(JSONB)
+    ingested_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar", "ts"),
+        Index("ix_ip_inst_ts", "inst_id", "ts"),
+        Index("ix_ip_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IndexPrice(inst={self.inst_id}, bar={self.bar}, ts={self.ts}, c={self.c})>"
+
+
+class OISyncState(Base):
+    """Open Interest 同步状态"""
+
+    __tablename__ = "oi_sync_state"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    earliest_ts = Column(DateTime(timezone=True))
+    latest_ts = Column(DateTime(timezone=True))
+    last_success_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OISyncState(inst={self.inst_id}, bar={self.bar}, status={self.status})>"
+
+
+class MarkPriceSyncState(Base):
+    """Mark Price 同步状态"""
+
+    __tablename__ = "mark_price_sync_state"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    earliest_ts = Column(DateTime(timezone=True))
+    latest_ts = Column(DateTime(timezone=True))
+    last_success_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarkPriceSyncState(inst={self.inst_id}, bar={self.bar}, status={self.status})>"
+
+
+class IndexPriceSyncState(Base):
+    """Index Price 同步状态"""
+
+    __tablename__ = "index_price_sync_state"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    earliest_ts = Column(DateTime(timezone=True))
+    latest_ts = Column(DateTime(timezone=True))
+    last_success_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IndexPriceSyncState(inst={self.inst_id}, bar={self.bar}, status={self.status})>"
+
+
+class FundingSyncState(Base):
+    """Funding Rate 同步状态"""
+
+    __tablename__ = "funding_sync_state"
+
+    inst_id = Column(String(50), primary_key=True)
+    earliest_ts = Column(DateTime(timezone=True))
+    latest_ts = Column(DateTime(timezone=True))
+    last_success_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    def __repr__(self) -> str:
+        return f"<FundingSyncState(inst={self.inst_id}, status={self.status})>"
+
+
+class MarketDataProvenance(Base):
+    """市场数据来源追踪（用于 funding_rates 等旧表，因其 schema 不可修改）"""
+
+    __tablename__ = "market_data_provenance"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    data_type = Column(String(50), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    biz_key = Column(String(200), nullable=False)
+    source = Column(String(20), nullable=False)
+    received_at = Column(DateTime(timezone=True))
+    ingested_at = Column(DateTime(timezone=True))
+    raw_hash = Column(String(64))
+    created_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_prov_type_biz", "data_type", "inst_id", "biz_key"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MarketDataProvenance(type={self.data_type}, inst={self.inst_id}, key={self.biz_key})>"
+
+
+class Instrument(Base):
+    """交易对/产品信息（Instruments）
+
+    来自 OKX /api/v5/public/instruments 接口，是后续所有 Downloader
+    的元数据依赖（ctVal/tickSz/lotSz 等）。
+    """
+
+    __tablename__ = "instruments"
+
+    inst_id = Column(String(50), primary_key=True)
+    inst_type = Column(String(20), nullable=False)
+    base_ccy = Column(String(20))
+    quote_ccy = Column(String(20))
+    settle_ccy = Column(String(20))
+    ct_val = Column(Numeric(30, 16))
+    ct_mult = Column(Numeric(30, 16))
+    tick_sz = Column(Numeric(30, 16))
+    lot_sz = Column(Numeric(30, 16))
+    min_sz = Column(Numeric(30, 16))
+    state = Column(String(20))
+    list_time = Column(DateTime(timezone=True))
+    exp_time = Column(DateTime(timezone=True))
+    lever = Column(Numeric(10, 6))
+    max_lmt_sz = Column(Numeric(30, 16))
+    max_mkt_sz = Column(Numeric(30, 16))
+    raw_json = Column(JSONB)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_instruments_type_state", "inst_type", "state"),
+        Index("ix_instruments_list_time", "list_time"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Instrument(inst_id={self.inst_id}, type={self.inst_type}, state={self.state})>"

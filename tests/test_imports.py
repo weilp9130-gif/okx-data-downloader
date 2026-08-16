@@ -17,7 +17,15 @@ class TestImports(unittest.TestCase):
         self.assertEqual(LISTENERS_FILE.name, "mihomo_listeners.yaml")
 
     def test_sub_packages(self):
-        from app.downloader import CandleDownloader, FundingRateDownloader  # noqa: F401
+        from app.downloader import (
+            CandleDownloader,
+            FundingRateDownloader,
+            IndexPriceDownloader,
+            InstrumentDownloader,
+            MarkPriceDownloader,
+            OpenInterestDownloader,
+            TradesDownloader,
+        )  # noqa: F401
         from app.utils import get_logger, bar_to_seconds, ms_to_datetime  # noqa: F401
         self.assertEqual(bar_to_seconds("1m"), 60)
 

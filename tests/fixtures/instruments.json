@@ -1,0 +1,40 @@
+[
+  {
+    "instType": "SWAP",
+    "instId": "BTC-USDT-SWAP",
+    "instFamily": "BTC-USDT",
+    "baseCcy": "BTC",
+    "quoteCcy": "USDT",
+    "settleCcy": "USDT",
+    "ctVal": "0.01",
+    "ctMult": "1",
+    "tickSz": "0.1",
+    "lotSz": "1",
+    "minSz": "1",
+    "state": "live",
+    "listTime": "1592819200000",
+    "expTime": "",
+    "lever": "125",
+    "maxLmtSz": "1000000",
+    "maxMktSz": "500000"
+  },
+  {
+    "instType": "SWAP",
+    "instId": "ETH-USDT-SWAP",
+    "instFamily": "ETH-USDT",
+    "baseCcy": "ETH",
+    "quoteCcy": "USDT",
+    "settleCcy": "USDT",
+    "ctVal": "0.1",
+    "ctMult": "1",
+    "tickSz": "0.01",
+    "lotSz": "1",
+    "minSz": "1",
+    "state": "live",
+    "listTime": "1592819300000",
+    "expTime": "",
+    "lever": "125",
+    "maxLmtSz": "2000000",
+    "maxMktSz": "1000000"
+  }
+]

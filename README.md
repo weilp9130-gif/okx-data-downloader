@@ -37,6 +37,7 @@ okx_data_downloader
 │       └── time_utils.py# 时间工具
 ├── main.py              # ★入口：单币种下载/增量/初始化数据库
 ├── download_all.py      # ★入口：全历史并行下载（支持IP代理池）
+├── backfill.py          # ★入口：REST 历史数据回填（Phase 1 起）
 ├── sync_continuous.py   # ★入口：连续同步（先全量追赶，再低资源实时同步）
 ├── sync_daemon.py       # ★入口：常驻实时同步守护（K线+资金费率）
 ├── tests/               # 单元测试（离线，python -m unittest discover -s tests）
@@ -125,7 +126,40 @@ docker run -d --name okx-timescaledb --restart unless-stopped \
 python main.py --init-db-only
 ```
 
-### 2. 下载K线数据
+### 2. 下载交易对信息（Instruments）
+
+`backfill.py` 是 REST 历史数据回填入口。Phase 1 已实现 `--type instruments`，用于拉取 OKX 产品/交易对元数据并写入 `instruments` 表，为后续各数据类型下载提供统一的元数据依赖。
+
+```bash
+# 下载并更新 SWAP 类产品信息（默认）
+python backfill.py --type instruments
+
+# 指定产品类型
+python backfill.py --type instruments --inst-type SPOT
+```
+
+### 2.1 回填周期市场数据（Phase 2：OI / Mark / Index / Funding）
+
+`backfill.py` 支持回填标记价格、指数价格、资金费率和持仓量快照。
+
+```bash
+# 标记价格 K线
+python backfill.py --type mark --inst BTC-USDT-SWAP --bar 1D --start 2024-01-01 --end 2024-02-01
+
+# 指数价格 K线
+python backfill.py --type index --inst BTC-USDT --bar 1D --start 2024-01-01 --end 2024-02-01
+
+# 资金费率
+python backfill.py --type funding --inst BTC-USDT-SWAP --start 2024-01-01 --end 2024-02-01
+
+# 持仓量快照（OKX 仅提供当前快照，无历史 OI 接口）
+python backfill.py --type oi --inst BTC-USDT-SWAP
+
+# 历史成交明细（默认 10 页，约 1000 条；通过 --max-pages 控制）
+python backfill.py --type trades --inst BTC-USDT-SWAP --max-pages 5
+```
+
+### 3. 下载K线数据
 
 ```bash
 # 使用默认配置下载（30天，ETH-USDT-SWAP/BTC-USDT-SWAP 等，1m粒度）
