@@ -159,6 +159,31 @@ python backfill.py --type oi --inst BTC-USDT-SWAP
 python backfill.py --type trades --inst BTC-USDT-SWAP --max-pages 5
 ```
 
+### 2.2 数据质量报告（Phase 3）
+
+`quality_report.py` 对入库数据进行三层质量验证：
+
+```bash
+# 单一类型质量报告
+python quality_report.py --type mark --inst BTC-USDT-SWAP --bar 1D
+
+# 全类型质量报告
+python quality_report.py --type all --inst BTC-USDT-SWAP --bar 1D --output .kilo/quality_report.json
+
+# 包含 Level 3 跨源一致性校验（trades 派生 volume vs candle volume）
+python quality_report.py --type all --inst BTC-USDT-SWAP --bar 1D --cross-source --start 2024-01-01 --end 2024-01-02
+```
+
+输出示例：
+
+```json
+{
+  "data_type": "mark",
+  "level1": { "mark_prices": { "total": 31, "duplicate": 0 } },
+  "level2": { "mark_prices": { "nulls": 0, "invalid_price": 0, "timestamp_regression": 0 } }
+}
+```
+
 ### 3. 下载K线数据
 
 ```bash

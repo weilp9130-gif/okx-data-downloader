@@ -350,6 +350,30 @@ class FundingSyncState(Base):
         return f"<FundingSyncState(inst={self.inst_id}, status={self.status})>"
 
 
+class DataQualityState(Base):
+    """数据质量状态"""
+
+    __tablename__ = "data_quality_state"
+
+    data_type = Column(String(50), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    latest_ts = Column(DateTime(timezone=True))
+    expected_ts = Column(DateTime(timezone=True))
+    gap_seconds = Column(Numeric(20, 4))
+    last_success_at = Column(DateTime(timezone=True))
+    last_error_at = Column(DateTime(timezone=True))
+    error_count = Column(Integer, default=0)
+    status = Column(String(20))
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("data_type", "inst_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DataQualityState(type={self.data_type}, inst={self.inst_id}, status={self.status})>"
+
+
 class MarketDataProvenance(Base):
     """市场数据来源追踪（用于 funding_rates 等旧表，因其 schema 不可修改）"""
 

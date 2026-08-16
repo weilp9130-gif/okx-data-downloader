@@ -108,17 +108,18 @@ def init_db() -> None:
     """初始化数据库：创建所有表和TimescaleDB hypertable"""
     from .models import (  # 导入以注册模型
         Candle,
+        DataQualityState,
         FundingRate,
+        FundingSyncState,
         IndexPrice,
+        IndexPriceSyncState,
         Instrument,
         MarkPrice,
+        MarkPriceSyncState,
         MarketDataProvenance,
         OpenInterest,
-        Trade,
-        FundingSyncState,
-        IndexPriceSyncState,
-        MarkPriceSyncState,
         OISyncState,
+        Trade,
         TradesSyncState,
     )
 
