@@ -34,7 +34,6 @@ class OpenInterestDownloader:
         Args:
             inst_id: 产品ID，如 BTC-USDT-SWAP
             bar: 数据粒度标记（默认 "current"，表示单点快照）
-
         Returns:
             int: 写入/更新数量
         """

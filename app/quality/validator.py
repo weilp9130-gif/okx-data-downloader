@@ -400,7 +400,9 @@ class DataQualityValidator:
                 text(
                     """
                     SELECT
-                        to_timestamp((EXTRACT(EPOCH FROM ts)::bigint / :interval) * :interval) AS bucket,
+                        to_timestamp(
+                            floor(EXTRACT(EPOCH FROM ts) / :interval)::bigint * :interval
+                        ) AS bucket,
                         SUM(sz) AS vol
                     FROM trades
                     WHERE inst_id = :inst_id AND ts BETWEEN :start AND :end

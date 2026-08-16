@@ -329,7 +329,7 @@ class TimeRangeRecovery(BaseRecovery):
             if data_type == "oi":
                 # OKX 无历史 OI 端点，只能取当前快照，无法覆盖 [start, end]
                 downloader = OpenInterestDownloader(client=self.client)
-                count = downloader.download(inst_id=inst_id, bar=bar)
+                count = downloader.download(inst_id=inst_id, bar="current")
                 status = RECOVERY_STATUS_PARTIAL
                 error = (
                     "OKX 无历史 open-interest 端点，仅回补当前快照，"

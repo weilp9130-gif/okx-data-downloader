@@ -77,6 +77,87 @@ class TestTradeAggregator(unittest.TestCase):
                 conn.execute(text("DELETE FROM trades WHERE inst_id = 'AGG-TEST-SWAP'"))
                 conn.execute(text("DELETE FROM trade_aggregates WHERE inst_id = 'AGG-TEST-SWAP'"))
 
+    def test_bucket_boundary_fractional_seconds(self):
+        """回归：EXTRACT(EPOCH)::bigint 会四舍五入导致桶错位（floor 修复）
+
+        ts=00:00:00.900 的成交必须属于 00:00 桶而非 00:01 桶。
+        """
+        from app.database import get_engine
+        from app.models import Trade
+        from sqlalchemy import text
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        base = datetime(2026, 8, 16, 10, 0, 0, tzinfo=timezone.utc)
+        trades = [
+            {
+                "inst_id": "AGG-BND-SWAP",
+                "trade_id": "b-1",
+                "ts": base.replace(microsecond=100000),  # 10:00:00.100
+                "px": "100",
+                "sz": "1",
+                "side": "buy",
+                "ingested_at": base,
+                "raw_json": {},
+            },
+            {
+                "inst_id": "AGG-BND-SWAP",
+                "trade_id": "b-2",
+                "ts": base.replace(microsecond=900000),  # 10:00:00.900
+                "px": "101",
+                "sz": "1",
+                "side": "buy",
+                "ingested_at": base,
+                "raw_json": {},
+            },
+            {
+                "inst_id": "AGG-BND-SWAP",
+                "trade_id": "b-3",
+                "ts": base.replace(second=1, microsecond=100000),  # 10:00:01.100
+                "px": "102",
+                "sz": "1",
+                "side": "buy",
+                "ingested_at": base,
+                "raw_json": {},
+            },
+        ]
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                pg_insert(Trade).values(trades).on_conflict_do_nothing(
+                    index_elements=["inst_id", "trade_id", "ts"]
+                )
+            )
+
+        try:
+            agg = TradeAggregator()
+            agg.aggregate(
+                inst_id="AGG-BND-SWAP",
+                bar="1s",
+                start=base,
+                end=base + __import__("datetime").timedelta(seconds=5),
+            )
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT ts, o, c, cnt FROM trade_aggregates
+                        WHERE inst_id = 'AGG-BND-SWAP' ORDER BY ts
+                        """
+                    )
+                ).fetchall()
+                # 2 个桶：10:00:00（含 0.1 与 0.9 两笔）、10:00:01（一笔）
+                self.assertEqual(len(rows), 2)
+                first, second = rows
+                self.assertEqual(float(first[1]), 100.0)   # o=首笔 100
+                self.assertEqual(float(first[2]), 101.0)   # c=末笔 101
+                self.assertEqual(int(first[3]), 2)         # cnt=2
+                self.assertEqual(float(second[1]), 102.0)
+                self.assertEqual(int(second[3]), 1)
+        finally:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM trades WHERE inst_id = 'AGG-BND-SWAP'"))
+                conn.execute(text("DELETE FROM trade_aggregates WHERE inst_id = 'AGG-BND-SWAP'"))
+
     def test_model(self):
         from app.models import TradeAggregate
         self.assertEqual(TradeAggregate.__tablename__, "trade_aggregates")

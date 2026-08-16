@@ -23,41 +23,74 @@ class BaseWriter(ABC):
     """实时数据写入基类
 
     提供有界队列、批量 flush、失败重试、背压机制。
+    - 缓冲满：put 阻塞最多 PUT_TIMEOUT 秒（生产侧放慢而非直接丢数据）
+    - batch 失败：回退指数退避后重试（不静默丢失）
     """
 
     MAX_BUFFER_SIZE = 10000
     FLUSH_INTERVAL = 1.0
     BATCH_SIZE = 1000
+    PUT_TIMEOUT = 1.0
+    RETRY_BACKOFF = 2.0
+    MAX_RETRY_BACKOFF = 30.0
 
     def __init__(self):
         self._buffer: queue.Queue = queue.Queue(maxsize=self.MAX_BUFFER_SIZE)
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._pending: List[dict] = []  # 失败待重试批次（保序）
         self._stopped = threading.Event()
+        self._last_flush = time.monotonic()
+        self._drops = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def put(self, item: dict) -> bool:
         """将数据放入写入队列
 
         Returns:
-            bool: True if success, False if buffer full (backpressure)
+            bool: True if success, False if buffer still full after PUT_TIMEOUT
         """
         try:
-            self._buffer.put_nowait(item)
+            self._buffer.put(item, timeout=self.PUT_TIMEOUT)
             return True
         except queue.Full:
-            logger.error("Writer buffer full, dropping item (backpressure)")
+            self._drops += 1
+            logger.error(
+                "Writer buffer full after %.1fs, dropped %d items (backpressure)",
+                self.PUT_TIMEOUT, self._drops,
+            )
             return False
 
+    @property
+    def drops(self) -> int:
+        return self._drops
+
     def stop(self, timeout: float = 5.0) -> None:
-        """停止写入线程并 flush 剩余数据"""
+        """停止写入线程并尝试 flush 剩余数据"""
         self._stopped.set()
         self._thread.join(timeout=timeout)
 
     def _run(self) -> None:
-        """后台写入线程"""
+        """后台写入线程：优先重试队列，其次消费缓冲"""
         batch: List[dict] = []
-        last_flush = time.monotonic()
+        backoff = self.RETRY_BACKOFF
         while not self._stopped.is_set():
+            # 1) 先处理失败重试队列
+            if self._pending:
+                pending_batch = self._pending
+                self._pending = []
+                try:
+                    self._flush(pending_batch)
+                    backoff = self.RETRY_BACKOFF
+                except Exception as e:
+                    logger.error(
+                        "Writer flush retry failed, next retry in %.1fs: %s", backoff, e
+                    )
+                    self._pending = pending_batch + self._pending
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, self.MAX_RETRY_BACKOFF)
+                continue
+
+            # 2) 消费缓冲
             try:
                 item = self._buffer.get(timeout=0.1)
                 batch.append(item)
@@ -65,14 +98,26 @@ class BaseWriter(ABC):
                 pass
 
             now = time.monotonic()
-            if len(batch) >= self.BATCH_SIZE or (batch and now - last_flush >= self.FLUSH_INTERVAL):
-                self._flush(batch)
+            if len(batch) >= self.BATCH_SIZE or (
+                batch and now - self._last_flush >= self.FLUSH_INTERVAL
+            ):
+                try:
+                    self._flush(batch)
+                    self._last_flush = now
+                    backoff = self.RETRY_BACKOFF
+                except Exception as e:
+                    logger.error("Writer flush failed, queued for retry: %s", e)
+                    self._pending = batch
+                    backoff = self.RETRY_BACKOFF
                 batch = []
-                last_flush = now
 
-        # flush remaining
-        if batch:
-            self._flush(batch)
+        # 3) 停止前尝试 flush 剩余（失败则记录，进程退出前已尽力）
+        remaining = self._pending + batch
+        if remaining:
+            try:
+                self._flush(remaining)
+            except Exception as e:
+                logger.error("Final flush failed on stop: %s", e)
 
     @abstractmethod
     def _flush(self, batch: List[dict]) -> None:
@@ -123,12 +168,10 @@ class OrderBookWriter(BaseWriter):
                 "received_at": stmt.excluded.received_at,
             },
         )
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(stmt)
-            logger.info("OrderBookWriter flushed %d snapshots", len(rows))
-        except Exception as e:
-            logger.error("OrderBookWriter snapshot flush failed: %s", e)
+        # 失败由 BaseWriter 重试，不再吞异常
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+        logger.info("OrderBookWriter flushed %d snapshots", len(rows))
 
     def _flush_factors(self, rows: List[dict]) -> None:
         from ..models import OrderBookFactor
@@ -150,12 +193,9 @@ class OrderBookWriter(BaseWriter):
                 "imbalance_10": stmt.excluded.imbalance_10,
             },
         )
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(stmt)
-            logger.info("OrderBookWriter flushed %d factors", len(rows))
-        except Exception as e:
-            logger.error("OrderBookWriter factor flush failed: %s", e)
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+        logger.info("OrderBookWriter flushed %d factors", len(rows))
 
     def _flush_sync_state(self, rows: List[dict]) -> None:
         from ..models import OrderBookSyncState
@@ -179,11 +219,8 @@ class OrderBookWriter(BaseWriter):
                 "updated_at": stmt.excluded.updated_at,
             },
         )
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(stmt)
-        except Exception as e:
-            logger.error("OrderBookWriter sync_state flush failed: %s", e)
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
 
 
 class MarketDataWriter(BaseWriter):
@@ -208,10 +245,8 @@ class MarketDataWriter(BaseWriter):
             grouped.setdefault(target, []).append(record)
 
         for target, rows in grouped.items():
-            try:
-                self._flush_target(target, rows)
-            except Exception as e:
-                logger.error("MarketDataWriter flush failed: target=%s | %s", target, e)
+            # 失败时抛给 BaseWriter 重试整个 batch，避免半写入
+            self._flush_target(target, rows)
 
     def _flush_target(self, target: str, rows: List[dict]) -> None:
         if target == "open_interest_realtime":
@@ -330,12 +365,10 @@ class TradeWriter(BaseWriter):
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["inst_id", "trade_id", "ts"]
         )
-        try:
-            with self.engine.begin() as conn:
-                conn.execute(stmt)
-            logger.info("TradeWriter flushed %d rows", len(rows))
-        except Exception as e:
-            logger.error("TradeWriter flush failed: %s", e)
+        # 失败抛给 BaseWriter 重试
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+        logger.info("TradeWriter flushed %d rows", len(rows))
 
     def _normalize(self, item: dict) -> dict:
         raw = item.get("raw_json", item)

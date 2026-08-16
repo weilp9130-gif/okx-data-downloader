@@ -98,7 +98,8 @@ class PeriodicCandleDownloader:
             return 0
 
         written = self._upsert(records)
-        self._update_sync_state(inst_id, bar, records[-1]["ts"], records[0]["ts"])
+        # OKX 返回最新在前：records[0] 最新，records[-1] 最旧
+        self._update_sync_state(inst_id, bar, records[0]["ts"], records[-1]["ts"])
         logger.info("%s 下载完成: %s | %s | %d 条", self.label, inst_id, bar, written)
         return written
 

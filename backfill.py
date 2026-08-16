@@ -253,8 +253,9 @@ def _run_one(data_type: str, args, client: OKXClient,
         return count
 
     if data_type == "oi":
+        # OKX 无历史 OI 端点，只取当前快照；bar 固定为 "current"
         count = OpenInterestDownloader(client=client, cfg=cfg).download(
-            inst_id=args.inst, bar=args.bar
+            inst_id=args.inst, bar="current"
         )
         logger.info("OpenInterest 回填完成，写入/更新 %d 条", count)
         return count

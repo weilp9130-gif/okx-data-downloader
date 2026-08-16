@@ -81,7 +81,7 @@ class TradeAggregator:
                         (ARRAY_AGG(px ORDER BY ts, trade_id))[1] AS o,
                         MAX(px) AS h,
                         MIN(px) AS l,
-                        (ARRAY_AGG(px ORDER BY ts, trade_id DESC))[1] AS c,
+                        (ARRAY_AGG(px ORDER BY ts DESC, trade_id DESC))[1] AS c,
                         SUM(sz) AS vol,
                         SUM(CASE WHEN side = 'buy' THEN sz ELSE 0 END) AS vol_buy,
                         SUM(CASE WHEN side = 'sell' THEN sz ELSE 0 END) AS vol_sell,
@@ -91,7 +91,9 @@ class TradeAggregator:
                         COUNT(*) FILTER (WHERE side = 'sell') AS cnt_sell
                     FROM (
                         SELECT
-                            to_timestamp((EXTRACT(EPOCH FROM ts)::bigint / :interval) * :interval) AS bucket,
+                            to_timestamp(
+                                floor(EXTRACT(EPOCH FROM ts) / :interval)::bigint * :interval
+                            ) AS bucket,
                             ts,
                             px,
                             sz,
