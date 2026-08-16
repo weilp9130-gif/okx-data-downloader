@@ -35,11 +35,10 @@ okx_data_downloader
 │       ├── __init__.py
 │       ├── logger.py    # 日志系统（控制台+文件轮转）
 │       └── time_utils.py# 时间工具
-├── main.py              # ★入口：单币种下载/增量/初始化数据库
-├── download_all.py      # ★入口：全历史并行下载（支持IP代理池）
-├── backfill.py          # ★入口：REST 历史数据回填（Phase 1 起）
-├── sync_continuous.py   # ★入口：连续同步（先全量追赶，再低资源实时同步）
-├── sync_daemon.py       # ★入口：常驻实时同步守护（K线+资金费率）
+├── backfill.py          # ★入口：REST 历史回填（instruments/oi/mark/index/funding/trades/trade_aggregates/all）
+├── sync_continuous.py   # ★入口：K线连续同步（先全量追赶，再低资源实时同步，含IP代理池）
+├── sync_realtime.py     # ★入口：WebSocket 实时采集（trades/orderbook/oi/funding/mark/index/kline）
+├── quality_report.py    # ★入口：数据质量报告（三层校验 + 索引验证）
 ├── tests/               # 单元测试（离线，python -m unittest discover -s tests）
 ├── pyproject.toml       # 包元数据/依赖（可选 pip install -e .）
 ├── env.template         # 环境变量模板
@@ -50,7 +49,6 @@ okx_data_downloader
 
 > 代码组织：`app/` 为可复用的库代码包，根目录四个入口脚本是面向任务的 CLI，
 > 均可直接 `python xxx.py` 运行。单元测试位于 `tests/`（离线，不依赖网络/数据库）。
-
 ## 环境要求
 
 - Python 3.9+
@@ -103,10 +101,10 @@ cp env.template .env      # Windows: copy env.template .env
 
 ```bash
 # 场景1：本机已有 PostgreSQL，直接连接（默认行为，无需改动）
-python download_all.py --dynamic --pool-size 16
+python sync_continuous.py --insts BTC-USDT-SWAP
 
 # 场景2：本机没有数据库，但有 Docker Desktop —— 自动启动 timescale 容器
-python download_all.py --dynamic --pool-size 16
+python backfill.py --type instruments
 
 # 场景3：手动管理容器（可选）
 docker run -d --name okx-timescaledb --restart unless-stopped \
@@ -123,7 +121,7 @@ docker run -d --name okx-timescaledb --restart unless-stopped \
 ### 1. 初始化数据库表结构
 
 ```bash
-python main.py --init-db-only
+python backfill.py --init-db-only
 ```
 
 ### 2. 下载交易对信息（Instruments）
@@ -232,7 +230,7 @@ FROM recovery_events ORDER BY id DESC LIMIT 20;
 SELECT * FROM data_gaps WHERE status = 'OPEN';
 ```
 
-### 2.2 数据质量报告（Phase 3）
+### 2.2 数据质量报告（Phase 3 / Phase 9）
 
 `quality_report.py` 对入库数据进行三层质量验证：
 
@@ -245,6 +243,9 @@ python quality_report.py --type all --inst BTC-USDT-SWAP --bar 1D --output .kilo
 
 # 包含 Level 3 跨源一致性校验（trades 派生 volume vs candle volume）
 python quality_report.py --type all --inst BTC-USDT-SWAP --bar 1D --cross-source --start 2024-01-01 --end 2024-01-02
+
+# 回归模式：EXPLAIN 验证 (inst_id, ts) 索引 + 发现问题时退出码 1
+python quality_report.py --type all --inst BTC-USDT-SWAP --explain-index --fail-on-issue
 ```
 
 输出示例：
@@ -257,28 +258,12 @@ python quality_report.py --type all --inst BTC-USDT-SWAP --bar 1D --cross-source
 }
 ```
 
-### 3. 下载K线数据
+`--explain-index` 会为每张时序表执行 `EXPLAIN` 并汇总扫描方式；估算行数低于
+1000 的小表走 Seq Scan 属规划器正常选择，标记 `skipped=true` 不计为问题。
 
-```bash
-# 使用默认配置下载（30天，ETH-USDT-SWAP/BTC-USDT-SWAP 等，1m粒度）
-python main.py
+### 3. K线连续同步（多合约）
 
-# 指定交易对和时间粒度
-python main.py --inst ETH-USDT-SWAP --bar 4H
-
-# 指定时间范围
-python main.py --inst BTC-USDT --bar 1D --start 2024-01-01 --end 2025-12-31
-
-# 只下载K线
-python main.py --type candles
-
-# 增量更新最近7天数据
-python main.py --update --lookback 7
-```
-
-### 3. 全历史并行下载（多合约，推荐）
-
-`download_all.py` 用于**批量下载所有 USDT 永续合约的全历史 K 线**，是功能最完整、速度最快的入口。
+`sync_continuous.py` 是 K 线下载的唯一入口，**批量下载所有 USDT 永续合约的全历史 K 线**并持续保持最新。
 
 核心优化：
 - **listTime 下界**：每个合约只回溯到它的实际上线时间（避开新币从 2019 起做无效回溯）
@@ -287,30 +272,29 @@ python main.py --update --lookback 7
 - **IP代理池**：每个币绑定一个独立出口IP，每个IP独立限速，吞吐 ≈ IP数×8 req/s（平滑限速消除429突发后实测可达）
 
 ```bash
-# 全历史下载所有 USDT 永续 1m K线（默认）
-python download_all.py
+# 全历史下载所有 USDT 永续 1m K线（默认，追赶完成后转实时同步）
+python sync_continuous.py
 
 # 自定义并发数与时间粒度
-python download_all.py --workers 8 --bar 5m
+python sync_continuous.py --workers 8 --bar 5m
 
-# 指定部分合约 + 起始时间
-python download_all.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP --start 2020-01-01
+# 指定部分合约
+python sync_continuous.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
 ```
 
 ### 3.1 IP代理池：动态模式（推荐，兼容节点/IP变化的VPN）
 
-VPN服务商节点经常变化，**不要写死节点和IP**。使用 `--dynamic` 让程序
+VPN服务商节点经常变化，**不要写死节点和IP**。`--dynamic`（默认开启）让程序
 在每次下载前自动完成：发现节点 → 逐个测试出口IP → 选独立IP →
 生成 Mihomo listeners（每节点一个本地端口）→ 写入 Clash Verge
 Merge.yaml → 等待内核重启 → 验证端口 → 构建动态代理池。
 
 ```bash
-# 动态IP池：自动选独立IP（默认16，本机有33个不同出口IP可--pool-size 32），
-# 每IP 4个并发（--workers 自动设为IP数×4）
-python download_all.py --dynamic --pool-size 16
+# 动态IP池：自动选独立IP（默认32），每IP多并发
+python sync_continuous.py --dynamic --pool-size 16
 
 # 用缓存复用上次测试结果（TTL 600s，适合频繁增量运行）
-python download_all.py --dynamic --pool-ttl 600
+python sync_continuous.py --dynamic --pool-ttl 600
 
 # 手动查看动态池运行产物（节点IP缓存 / 生成的listeners配置）
 # 位置：runtime/dynamic_pool_cache.json、runtime/mihomo_listeners.yaml
@@ -343,7 +327,7 @@ OKX_IP_RATE_LIMIT_PER_SECOND=8
 
 # --workers 建议为 IP 数×4（每IP保持4线程，吃满每IP限速）
 # 本机有33个不同出口IP，--pool-size 32 可提速约2倍
-python download_all.py --proxy-pool --proxy-verify --workers 16
+python sync_continuous.py --proxy-pool --proxy-verify --workers 16
 ```
 
 ### 4. 连续同步下载（两阶段：先全量追赶，再低资源实时同步）
@@ -388,7 +372,7 @@ python sync_continuous.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
 
 ```bash
 # 只下载资金费率（仅合约产品）
-python main.py --type funding --inst ETH-USDT-SWAP
+python backfill.py --type funding --inst ETH-USDT-SWAP --limit-days 30
 ```
 
 ### 6. 编程式使用
@@ -432,7 +416,7 @@ python -m unittest discover -s tests -v
 14:24:31 INFO  | downloader.candles | [进度] AVAX-USDT-SWAP | 1m | 回溯至 2023-04-25 05:20 | 页 400
 ```
 
-- 组件名 = 模块名去掉 `app.` 前缀（`app.downloader.candles` → `downloader.candles`）；入口脚本用脚本名（`main`/`download_all`/`sync_continuous`/`sync_daemon`）
+- 组件名 = 模块名去掉 `app.` 前缀（`app.downloader.candles` → `downloader.candles`）；入口脚本用脚本名（`backfill`/`sync_continuous`/`sync_realtime`/`quality_report`）
 - 控制台简洁（无日期），日志文件完整（带日期毫秒）
 
 **级别规则**
@@ -498,11 +482,14 @@ python -m unittest discover -s tests -v
 可通过 cron / Task Scheduler 定时执行增量更新：
 
 ```bash
-# 每小时增量更新最近1小时K线
-python main.py --update --lookback 1 --type candles
+# 每小时增量回填最近1天资金费率
+python backfill.py --type funding --inst BTC-USDT-SWAP --limit-days 1
 
-# 每天增量更新最近1天资金费率
-python main.py --update --lookback 1 --type funding
+# 每天回填 OI/Mark/Index/Funding/Instruments
+python backfill.py --type all --inst BTC-USDT-SWAP --limit-days 1
+
+# 每天做一次数据质量回归（有问题时退出码 1，便于告警）
+python quality_report.py --type all --inst BTC-USDT-SWAP --explain-index --fail-on-issue
 ```
 
 ## 常见问题

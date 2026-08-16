@@ -474,3 +474,141 @@ class DataQualityValidator:
         )
         with self.engine.begin() as conn:
             conn.execute(stmt)
+
+    # ------------------------------------------------------------------
+    # Phase 9: 回归检查与索引验证
+    # ------------------------------------------------------------------
+    def collect_issues(self, report: Dict[str, Any]) -> List[str]:
+        """从报告中提取阻断性问题（用于回归测试 --fail-on-issue）
+
+        判定为问题的指标：duplicate / nulls / invalid_* / timestamp_regression
+        / duplicate_trade_id / null_fields，只要 > 0 即视为问题。
+        """
+        issue_keys = (
+            "duplicate",
+            "nulls",
+            "null_fields",
+            "invalid_price",
+            "invalid_price_size",
+            "invalid_oi",
+            "timestamp_regression",
+            "duplicate_trade_id",
+        )
+        issues: List[str] = []
+        data_type = report.get("data_type")
+        for level in ("level1", "level2", "level3"):
+            for table, metrics in (report.get(level) or {}).items():
+                if not isinstance(metrics, dict):
+                    continue
+                for key, value in metrics.items():
+                    if key not in issue_keys:
+                        continue
+                    try:
+                        numeric = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if numeric > 0:
+                        issues.append(
+                            f"{data_type}/{level}/{table}/{key}={value}"
+                        )
+        return issues
+
+    # 小表 PostgreSQL 规划器会优先 Seq Scan，此阈值以下不判定为索引缺失
+    INDEX_CHECK_MIN_ROWS = 1000
+
+    # EXPLAIN ANALYZE 会真实执行查询，超时保护避免大表 Seq Scan 卡死
+    INDEX_CHECK_TIMEOUT_MS = 15000
+
+    def _estimate_rows(self, conn, table: str) -> int:
+        """用 planner 统计估算行数（含 hypertable chunks），避免精确 COUNT(*) 全表扫描"""
+        try:
+            return int(conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(c.reltuples), 0)::bigint
+                    FROM pg_class c
+                    WHERE c.oid = CAST(:table AS regclass)
+                       OR c.oid IN (
+                            SELECT inhrelid FROM pg_inherits
+                            WHERE inhparent = CAST(:table AS regclass)
+                       )
+                    """
+                ),
+                {"table": table},
+            ).scalar() or 0)
+        except Exception:
+            return 0
+
+    def explain_index_usage(self, inst_id: str, tables: Optional[List[str]] = None
+                            ) -> Dict[str, Any]:
+        """验证 (inst_id, ts) 范围查询是否走索引
+
+        先用 EXPLAIN（不执行）判定扫描方式，再用带 statement_timeout 的
+        EXPLAIN ANALYZE 获取真实执行计划；后者超时不影响索引判定。
+
+        小表（估算行数 < INDEX_CHECK_MIN_ROWS）走 Seq Scan 属规划器正常选择，
+        标记 skipped=True，不视为索引问题。
+
+        Returns:
+            dict: {table: {"uses_index": bool, "seq_scan": bool, "rows": int,
+                           "skipped": bool, "plan": str, "analyzed": bool}}
+        """
+        tables = tables or [
+            "candles",
+            "funding_rates",
+            "trades",
+            "mark_prices",
+            "index_prices",
+            "open_interest",
+            "open_interest_realtime",
+            "trade_aggregates",
+            "order_book_snapshots",
+        ]
+        query = """
+            SELECT * FROM {table}
+            WHERE inst_id = :inst_id
+              AND ts BETWEEN now() - INTERVAL '7 days' AND now()
+            ORDER BY ts DESC
+            LIMIT 100
+        """
+        results: Dict[str, Any] = {}
+        for table in tables:
+            # 每个表用独立连接，避免超时/取消污染后续查询
+            try:
+                with self.engine.connect() as conn:
+                    row_count = self._estimate_rows(conn, table)
+                    plan_rows = conn.execute(
+                        text("EXPLAIN " + query.format(table=table)),
+                        {"inst_id": inst_id},
+                    ).fetchall()
+                    plan = "\n".join(r[0] for r in plan_rows)
+            except Exception as e:
+                results[table] = {"error": str(e)}
+                continue
+
+            analyzed_plan = None
+            try:
+                with self.engine.connect() as conn:
+                    conn.execute(
+                        text(f"SET statement_timeout = {self.INDEX_CHECK_TIMEOUT_MS}")
+                    )
+                    analyze_rows = conn.execute(
+                        text("EXPLAIN ANALYZE " + query.format(table=table)),
+                        {"inst_id": inst_id},
+                    ).fetchall()
+                    analyzed_plan = "\n".join(r[0] for r in analyze_rows)
+            except Exception as e:
+                logger.warning("EXPLAIN ANALYZE 超时/失败: %s | %s", table, e)
+
+            effective_plan = analyzed_plan or plan
+            uses_index = "Index Scan" in plan or "Index Only Scan" in plan
+            results[table] = {
+                "uses_index": uses_index,
+                "seq_scan": "Seq Scan" in plan,
+                "rows": row_count,
+                "skipped": row_count < self.INDEX_CHECK_MIN_ROWS,
+                "analyzed": analyzed_plan is not None,
+                "plan": effective_plan,
+            }
+        self.report.setdefault("index_check", {}).update(results)
+        return results
