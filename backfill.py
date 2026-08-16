@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from app.config import Config
 from app.database import init_db
+from app.aggregation.trades import TradeAggregator
 from app.downloader.funding import FundingRateDownloader
 from app.downloader.index_price import IndexPriceDownloader
 from app.downloader.instruments import InstrumentDownloader
@@ -23,7 +24,7 @@ from app.utils.time_utils import parse_date
 
 logger = get_logger("backfill")
 
-VALID_TYPES = {"instruments", "oi", "mark", "index", "funding", "trades"}
+VALID_TYPES = {"instruments", "oi", "mark", "index", "funding", "trades", "trade_aggregates"}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -159,6 +160,14 @@ def main() -> int:
             inst_id=args.inst, start=start, end=end, max_pages=args.max_pages
         )
         logger.info("Trades 回填完成，写入/更新 %d 条", count)
+        return 0
+
+    if args.data_type == "trade_aggregates":
+        aggregator = TradeAggregator()
+        count = aggregator.aggregate(
+            inst_id=args.inst, bar=args.bar, start=start, end=end
+        )
+        logger.info("Trade 聚合完成，写入/更新 %d 条", count)
         return 0
 
     return 1

@@ -125,7 +125,7 @@ def bar_to_seconds(bar: str) -> int:
     unit = base[-1]
     value = int(base[:-1])
 
-    multipliers = {"m": 60, "H": 3600, "D": 86400, "W": 604800, "M": 2592000}
+    multipliers = {"s": 1, "m": 60, "H": 3600, "D": 86400, "W": 604800, "M": 2592000}
     if unit not in multipliers:
         raise ValueError(f"不支持的时间粒度: {bar}")
     return value * multipliers[unit]

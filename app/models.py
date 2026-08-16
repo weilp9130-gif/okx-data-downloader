@@ -157,6 +157,41 @@ class Trade(Base):
         return f"<Trade(inst={self.inst_id}, trade_id={self.trade_id}, ts={self.ts})>"
 
 
+class TradeAggregate(Base):
+    """Trade 聚合数据（1s / 1m 等时间桶）
+
+    由 trades 按时间桶聚合得到，支持迟到数据重新计算。
+    """
+
+    __tablename__ = "trade_aggregates"
+
+    inst_id = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    o = Column(Numeric(20, 8))
+    h = Column(Numeric(20, 8))
+    l = Column(Numeric(20, 8))
+    c = Column(Numeric(20, 8))
+    vol = Column(Numeric(30, 16))
+    vol_buy = Column(Numeric(30, 16))
+    vol_sell = Column(Numeric(30, 16))
+    vol_contract = Column(Numeric(30, 16))
+    cnt = Column(Integer)
+    cnt_buy = Column(Integer)
+    cnt_sell = Column(Integer)
+    is_final = Column(Numeric(1, 0), default=0)
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        PrimaryKeyConstraint("inst_id", "bar", "ts"),
+        Index("ix_trade_agg_inst_ts", "inst_id", "ts"),
+        Index("ix_trade_agg_ts", "ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TradeAggregate(inst={self.inst_id}, bar={self.bar}, ts={self.ts}, vol={self.vol})>"
+
+
 class TradesSyncState(Base):
     """Trades 同步状态"""
 

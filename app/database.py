@@ -120,6 +120,7 @@ def init_db() -> None:
         OpenInterest,
         OISyncState,
         Trade,
+        TradeAggregate,
         TradesSyncState,
     )
 
@@ -173,6 +174,11 @@ def _create_hypertables(engine: Engine) -> None:
             conn.execute(text(
                 "SELECT create_hypertable('trades', 'ts', "
                 "chunk_time_interval => INTERVAL '1 week', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            conn.execute(text(
+                "SELECT create_hypertable('trade_aggregates', 'ts', "
+                "chunk_time_interval => INTERVAL '2 weeks', "
                 "if_not_exists => TRUE, migrate_data => TRUE)"
             ))
             conn.commit()

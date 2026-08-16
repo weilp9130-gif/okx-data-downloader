@@ -174,6 +174,16 @@ python sync_realtime.py --insts BTC-USDT-SWAP --duration 60
 python sync_realtime.py --insts BTC-USDT-SWAP,ETH-USDT-SWAP
 ```
 
+### 2.4 Trade 聚合（Phase 5）
+
+```bash
+# 按 1m 桶聚合 trades
+python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1m --start 2026-08-16 --end 2026-08-17
+
+# 按 1s 桶聚合（适合实时采集后的二次聚合）
+python backfill.py --type trade_aggregates --inst BTC-USDT-SWAP --bar 1s --start 2026-08-16 --end 2026-08-17
+```
+
 ### 2.2 数据质量报告（Phase 3）
 
 `quality_report.py` 对入库数据进行三层质量验证：
