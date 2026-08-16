@@ -576,3 +576,63 @@ class Instrument(Base):
 
     def __repr__(self) -> str:
         return f"<Instrument(inst_id={self.inst_id}, type={self.inst_type}, state={self.state})>"
+
+
+class RecoveryEvent(Base):
+    """Recovery 事件表（Phase 8 创建）
+
+    用于把日志、数据库、程序日志关联到同一次 Recovery Operation。
+    """
+
+    __tablename__ = "recovery_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    recovery_id = Column(String(36), nullable=False)
+    data_type = Column(String(50), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True))
+    reason = Column(String(40))
+    from_ts = Column(DateTime(timezone=True))
+    to_ts = Column(DateTime(timezone=True))
+    from_id = Column(String(80))
+    to_id = Column(String(80))
+    rows_recovered = Column(BigInteger)
+    status = Column(String(20))
+    error_message = Column(String(2000))
+    updated_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_recovery_events_type_inst", "data_type", "inst_id", "started_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RecoveryEvent(type={self.data_type}, inst={self.inst_id}, status={self.status})>"
+
+
+class DataGap(Base):
+    """数据缺口登记表（Phase 8 创建）
+
+    同一 data_type + inst_id + gap interval 只登记一次。
+    """
+
+    __tablename__ = "data_gaps"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    data_type = Column(String(50), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    start_ts = Column(DateTime(timezone=True))
+    end_ts = Column(DateTime(timezone=True))
+    gap_type = Column(String(40))
+    status = Column(String(20))
+    detected_at = Column(DateTime(timezone=True))
+    recovered_at = Column(DateTime(timezone=True))
+    recovery_rows = Column(BigInteger)
+    error_message = Column(String(2000))
+
+    __table_args__ = (
+        Index("ix_data_gaps_type_inst", "data_type", "inst_id", "start_ts"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DataGap(type={self.data_type}, inst={self.inst_id}, status={self.status})>"

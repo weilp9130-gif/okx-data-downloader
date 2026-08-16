@@ -213,6 +213,25 @@ python sync_realtime.py --insts BTC-USDT --channels index
 python sync_realtime.py --insts BTC-USDT-SWAP --channels oi,funding,mark
 ```
 
+### 2.7 统一 Recovery 与缺口管理（Phase 8）
+
+`sync_realtime.py` 启动时及断线重连后自动执行 Recovery：
+
+- **Trades**：基于最新 `trade_id` 用 REST `history-trades` 回补
+- **OI / Mark / Index / Funding**：基于时间范围用 REST 回补
+- **OrderBook**：seq gap 触发 resync（等待 `action=snapshot`）
+
+所有 Recovery 操作记录到 `recovery_events` 表，数据缺口登记到 `data_gaps` 表（同一区间防重复登记）：
+
+```sql
+-- 查看最近恢复事件
+SELECT data_type, inst_id, status, rows_recovered, started_at
+FROM recovery_events ORDER BY id DESC LIMIT 20;
+
+-- 查看未恢复缺口
+SELECT * FROM data_gaps WHERE status = 'OPEN';
+```
+
 ### 2.2 数据质量报告（Phase 3）
 
 `quality_report.py` 对入库数据进行三层质量验证：

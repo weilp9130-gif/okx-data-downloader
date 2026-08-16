@@ -108,6 +108,7 @@ def init_db() -> None:
     """初始化数据库：创建所有表和TimescaleDB hypertable"""
     from .models import (  # 导入以注册模型
         Candle,
+        DataGap,
         DataQualityState,
         FundingRate,
         FundingSyncState,
@@ -123,6 +124,7 @@ def init_db() -> None:
         OrderBookFactor,
         OrderBookSnapshot,
         OrderBookSyncState,
+        RecoveryEvent,
         Trade,
         TradeAggregate,
         TradesSyncState,

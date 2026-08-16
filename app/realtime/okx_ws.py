@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 import websockets
 
@@ -24,14 +24,18 @@ class OKXWebSocketClient:
         self,
         url: str = OKX_WS_URL,
         on_message: Optional[Callable[[dict], None]] = None,
+        on_reconnect: Optional[Callable[[], None]] = None,
         ping_interval: int = 25,
         pong_timeout: int = 10,
+        message_timeout: int = 120,
         reconnect_delay: float = 1.0,
     ):
         self.url = url
         self.on_message = on_message
+        self.on_reconnect = on_reconnect
         self.ping_interval = ping_interval
         self.pong_timeout = pong_timeout
+        self.message_timeout = message_timeout
         self.reconnect_delay = reconnect_delay
 
         self._ws = None
@@ -45,6 +49,7 @@ class OKXWebSocketClient:
     async def connect(self) -> None:
         """建立 WebSocket 连接并启动接收循环"""
         self._running = True
+        first_connect = True
         while self._running:
             try:
                 logger.info("Connecting to OKX WebSocket: %s", self.url)
@@ -54,6 +59,9 @@ class OKXWebSocketClient:
                     # 重新订阅
                     if self._subscribed_args:
                         await self.subscribe(self._subscribed_args)
+                    if not first_connect and self.on_reconnect:
+                        self.on_reconnect()
+                    first_connect = False
                     # 启动接收和心跳
                     await asyncio.gather(
                         self._receive_loop(),
@@ -135,14 +143,34 @@ class OKXWebSocketClient:
                 logger.warning("Failed to decode WS message: %s", e)
 
     async def _heartbeat_loop(self) -> None:
-        """心跳循环"""
+        """心跳循环
+
+        同时检测 message_timeout：长时间无任何数据则强制重连。
+        """
         while self._running:
-            await asyncio.sleep(self.ping_interval)
+            await asyncio.sleep(min(self.ping_interval, 5))
             if self._ws is None:
                 continue
+
+            now = time.time()
+            # 长时间无任何消息（心跳或数据）→ 强制重连
+            if now - self._last_message_at > self.message_timeout:
+                logger.error(
+                    "WebSocket message timeout (%.0fs no message), forcing reconnect",
+                    now - self._last_message_at,
+                )
+                break
+
+            if now - self._last_pong_at > self.pong_timeout and self._last_pong_at > 0:
+                logger.warning(
+                    "WebSocket pong timeout (%.0fs), forcing reconnect",
+                    now - self._last_pong_at,
+                )
+                break
+
             try:
                 await self._ws.send("ping")
-                self._last_ping_at = time.time()
+                self._last_ping_at = now
             except Exception as e:
                 logger.warning("Failed to send ping: %s", e)
                 break

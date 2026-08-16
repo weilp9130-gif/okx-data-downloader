@@ -1,20 +1,27 @@
-"""WebSocket 实时管理器"""
+"""WebSocket 实时管理器（Phase 8 统一调度）
+
+分层：
+    SubscriptionManager  -> 订阅参数构建与频道映射
+    Data Handlers        -> trades / orderbook / market_data
+    RealtimeManager      -> 生命周期、消息分发、断线恢复
+"""
 
 import asyncio
 import threading
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..utils.logger import get_logger
 from .market_data import MarketDataHandler
 from .okx_ws import OKXWebSocketClient
 from .orderbook import OrderBookHandler
-from .recovery import TradeRecovery
+from .recovery import RecoveryManager
 from .trades import TradesRealtimeHandler
 from .writer import MarketDataWriter, OrderBookWriter, TradeWriter
 
 logger = get_logger(__name__)
 
-# 市场数据频道 -> OKX channel 前缀（orderbook 与 trades 单独处理）
+# 市场数据频道 -> OKX channel 前缀
 MARKET_DATA_CHANNELS = {"oi", "funding", "mark", "index", "kline"}
 
 # 市场数据频道对应的订阅参数构造
@@ -25,6 +32,40 @@ MARKET_DATA_SUBSCRIBE = {
     "index": {"channel": "index-tickers"},
     "kline": {"channel": "candle1m"},
 }
+
+# 频道 -> 断线恢复数据类型
+CHANNEL_RECOVERY_TYPE = {
+    "trades": "trades",
+    "oi": "oi",
+    "mark": "mark",
+    "index": "index",
+    "funding": "funding",
+    "orderbook": "orderbook",
+}
+
+
+class SubscriptionManager:
+    """订阅参数管理：channel + inst_id 映射"""
+
+    def __init__(self, inst_ids: List[str], channels: List[str]):
+        self.inst_ids = inst_ids
+        self.channels = list(channels)
+
+    @property
+    def args(self) -> List[dict]:
+        """生成订阅参数列表"""
+        args: List[dict] = []
+        if "trades" in self.channels:
+            args.extend([{"channel": "trades", "instId": i} for i in self.inst_ids])
+        if "orderbook" in self.channels or "books" in self.channels:
+            args.extend([{"channel": "books", "instId": i} for i in self.inst_ids])
+        for ch in self.channels:
+            if ch in MARKET_DATA_SUBSCRIBE:
+                template = MARKET_DATA_SUBSCRIBE[ch]
+                args.extend(
+                    [{"channel": template["channel"], "instId": i} for i in self.inst_ids]
+                )
+        return args
 
 
 class RealtimeManager:
@@ -43,6 +84,7 @@ class RealtimeManager:
     def __init__(self, inst_ids: List[str], channels: List[str] = None):
         self.inst_ids = inst_ids
         self.channels = channels or ["trades"]
+        self.subscriptions = SubscriptionManager(inst_ids, self.channels)
         self.use_trades = "trades" in self.channels
         self.use_orderbook = "orderbook" in self.channels or "books" in self.channels
         self.use_market_data = any(c in self.channels for c in MARKET_DATA_CHANNELS)
@@ -52,7 +94,7 @@ class RealtimeManager:
         self.orderbook_handlers: Dict[str, OrderBookHandler] = {}
         self.market_data_writer: Optional[MarketDataWriter] = None
         self.market_data_handler = MarketDataHandler()
-        self.recovery = TradeRecovery()
+        self.recovery = RecoveryManager()
         self.client: Optional[OKXWebSocketClient] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -99,16 +141,34 @@ class RealtimeManager:
             if self.market_data_writer:
                 self._handle_market_data(data)
 
-        self.client = OKXWebSocketClient(on_message=on_message)
-        # 启动时执行一次 trades 恢复
-        if self.use_trades:
-            for inst_id in self.inst_ids:
-                try:
-                    self.recovery.recover(inst_id)
-                except Exception as e:
-                    logger.error("Recovery failed for %s: %s", inst_id, e)
+        def on_reconnect():
+            self._run_recovery()
+
+        self.client = OKXWebSocketClient(
+            on_message=on_message,
+            on_reconnect=on_reconnect,
+        )
+        # 启动时执行一次恢复
+        self._run_recovery()
 
         self._loop.run_until_complete(self._connect_and_run())
+
+    def _run_recovery(self) -> None:
+        """对启用频道执行断线恢复"""
+        recovery_types = set()
+        for ch in self.channels:
+            dt = CHANNEL_RECOVERY_TYPE.get(ch)
+            if dt:
+                recovery_types.add(dt)
+        if not recovery_types:
+            return
+        now = datetime.now(timezone.utc)
+        for inst_id in self.inst_ids:
+            for dt in sorted(recovery_types):
+                try:
+                    self.recovery.recover(dt, inst_id, reason="WS_RECONNECT")
+                except Exception as e:
+                    logger.error("Recovery failed: %s %s | %s", dt, inst_id, e)
 
     def _handle_orderbook(self, data: dict) -> None:
         arg = data.get("arg", {})
@@ -128,7 +188,6 @@ class RealtimeManager:
             inst_id = arg.get("instId")
             if not inst_id:
                 return
-            from datetime import datetime, timezone
             bar = channel[len("candle"):]
             records = self.market_data_handler.handle_candles_with_inst(
                 data, bar, inst_id, datetime.now(timezone.utc)
@@ -140,16 +199,5 @@ class RealtimeManager:
             self.market_data_writer.put(item)
 
     async def _connect_and_run(self) -> None:
-        args = []
-        if self.use_trades:
-            args.extend([{"channel": "trades", "instId": i} for i in self.inst_ids])
-        if self.use_orderbook:
-            args.extend([{"channel": "books", "instId": i} for i in self.inst_ids])
-        for ch in self.channels:
-            if ch in MARKET_DATA_SUBSCRIBE:
-                template = MARKET_DATA_SUBSCRIBE[ch]
-                args.extend(
-                    [{"channel": template["channel"], "instId": i} for i in self.inst_ids]
-                )
-        self.client.set_subscriptions(args)
+        self.client.set_subscriptions(self.subscriptions.args)
         await self.client.connect()
