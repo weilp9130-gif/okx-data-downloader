@@ -85,6 +85,10 @@ class OKXWebSocketClient:
         await self._ws.send(json.dumps(msg))
         logger.info("Subscribed: %s", args)
 
+    def set_subscriptions(self, args: List[dict]) -> None:
+        """设置连接建立后要订阅的参数列表（供 connect 重连时使用）"""
+        self._subscribed_args = list(args)
+
     async def unsubscribe(self, args: List[dict]) -> None:
         """发送取消订阅消息"""
         if self._ws is None:

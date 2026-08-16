@@ -3,14 +3,11 @@
 实现本地 OrderBookState 重建、seq gap 检测、resync、快照持久化。
 """
 
-import json
-import time
 import threading
-from bisect import bisect_left, insort
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..utils.logger import get_logger
 from ..utils.time_utils import ms_to_datetime
@@ -199,7 +196,8 @@ class OrderBookHandler:
             return None
 
         if action == "snapshot":
-            self.state.prepare_resync() if self.state.state != "INIT" else None
+            if self.state.state != "INIT":
+                self.state.prepare_resync()
             self.state.apply_snapshot(item)
             logger.info(
                 "OrderBook snapshot ready: %s | seq=%s | bids=%d | asks=%d",

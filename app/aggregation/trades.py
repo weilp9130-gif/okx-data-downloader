@@ -70,7 +70,7 @@ class TradeAggregator:
     ) -> List[Dict]:
         """按时间桶聚合 trades
 
-        使用窗口函数 first_value/last_value 按 ts 排序，获取每个桶的开盘/收盘。
+        使用 GROUP BY + array_agg 取首/末价，每桶仅返回一行。
         """
         with self.engine.connect() as conn:
             rows = conn.execute(
@@ -78,20 +78,17 @@ class TradeAggregator:
                     """
                     SELECT
                         bucket,
-                        FIRST_VALUE(px) OVER (PARTITION BY bucket ORDER BY ts, trade_id) AS o,
-                        MAX(px) OVER (PARTITION BY bucket) AS h,
-                        MIN(px) OVER (PARTITION BY bucket) AS l,
-                        LAST_VALUE(px) OVER (
-                            PARTITION BY bucket ORDER BY ts, trade_id
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-                        ) AS c,
-                        SUM(sz) OVER (PARTITION BY bucket) AS vol,
-                        SUM(CASE WHEN side = 'buy' THEN sz ELSE 0 END) OVER (PARTITION BY bucket) AS vol_buy,
-                        SUM(CASE WHEN side = 'sell' THEN sz ELSE 0 END) OVER (PARTITION BY bucket) AS vol_sell,
-                        SUM(sz) OVER (PARTITION BY bucket) AS vol_contract,
-                        COUNT(*) OVER (PARTITION BY bucket) AS cnt,
-                        COUNT(*) FILTER (WHERE side = 'buy') OVER (PARTITION BY bucket) AS cnt_buy,
-                        COUNT(*) FILTER (WHERE side = 'sell') OVER (PARTITION BY bucket) AS cnt_sell
+                        (ARRAY_AGG(px ORDER BY ts, trade_id))[1] AS o,
+                        MAX(px) AS h,
+                        MIN(px) AS l,
+                        (ARRAY_AGG(px ORDER BY ts, trade_id DESC))[1] AS c,
+                        SUM(sz) AS vol,
+                        SUM(CASE WHEN side = 'buy' THEN sz ELSE 0 END) AS vol_buy,
+                        SUM(CASE WHEN side = 'sell' THEN sz ELSE 0 END) AS vol_sell,
+                        SUM(sz) AS vol_contract,
+                        COUNT(*) AS cnt,
+                        COUNT(*) FILTER (WHERE side = 'buy') AS cnt_buy,
+                        COUNT(*) FILTER (WHERE side = 'sell') AS cnt_sell
                     FROM (
                         SELECT
                             to_timestamp((EXTRACT(EPOCH FROM ts)::bigint / :interval) * :interval) AS bucket,
@@ -103,6 +100,8 @@ class TradeAggregator:
                         FROM trades
                         WHERE inst_id = :inst_id AND ts BETWEEN :start AND :end
                     ) AS ordered
+                    GROUP BY bucket
+                    ORDER BY bucket
                     """
                 ),
                 {
@@ -113,17 +112,10 @@ class TradeAggregator:
                 },
             ).mappings().all()
 
-        # 去重 bucket
-        seen = set()
-        result = []
-        for r in rows:
-            bucket = r["bucket"]
-            if bucket in seen:
-                continue
-            seen.add(bucket)
-            result.append({
+        return [
+            {
                 "inst_id": inst_id,
-                "ts": bucket,
+                "ts": r["bucket"],
                 "o": r["o"],
                 "h": r["h"],
                 "l": r["l"],
@@ -135,8 +127,9 @@ class TradeAggregator:
                 "cnt": r["cnt"],
                 "cnt_buy": r["cnt_buy"],
                 "cnt_sell": r["cnt_sell"],
-            })
-        return result
+            }
+            for r in rows
+        ]
 
     def _upsert(self, rows: List[Dict]) -> int:
         if not rows:

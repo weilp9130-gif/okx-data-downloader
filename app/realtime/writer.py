@@ -1,17 +1,16 @@
 """实时数据写入模块
 
-BaseWriter + TradeWriter
+BaseWriter + TradeWriter + OrderBookWriter
 """
 
 import hashlib
 import json
 import queue
 import threading
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Dict, List
-
-import time
+from typing import List
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -79,12 +78,6 @@ class BaseWriter(ABC):
     @abstractmethod
     def _flush(self, batch: List[dict]) -> None:
         pass
-
-
-import time as _time_module
-
-# patch time reference
-import time as _time_ref
 
 
 class OrderBookWriter(BaseWriter):

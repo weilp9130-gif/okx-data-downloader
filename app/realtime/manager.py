@@ -99,5 +99,5 @@ class RealtimeManager:
             args.extend([{"channel": "trades", "instId": i} for i in self.inst_ids])
         if self.use_orderbook:
             args.extend([{"channel": "books", "instId": i} for i in self.inst_ids])
-        self.client._subscribed_args = args
+        self.client.set_subscriptions(args)
         await self.client.connect()

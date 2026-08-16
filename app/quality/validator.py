@@ -260,7 +260,35 @@ class DataQualityValidator:
 
     def _validate_open_interest(self, inst_id: str) -> None:
         """Open Interest 质量检查"""
-        self._level1("open_interest", inst_id)
+        # open_interest 业务唯一键为 (inst_id, bar, ts)，需按 bar 分组
+        with self.engine.connect() as conn:
+            total = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM open_interest WHERE inst_id = :inst_id"
+                ),
+                {"inst_id": inst_id},
+            ).scalar()
+
+            duplicate = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM (
+                        SELECT inst_id, bar, ts, COUNT(*) c
+                        FROM open_interest
+                        WHERE inst_id = :inst_id
+                        GROUP BY inst_id, bar, ts
+                        HAVING COUNT(*) > 1
+                    ) t
+                    """
+                ),
+                {"inst_id": inst_id},
+            ).scalar()
+
+        self.report["level1"]["open_interest"] = {
+            "total": total,
+            "duplicate": duplicate or 0,
+        }
+
         with self.engine.connect() as conn:
             invalid = conn.execute(
                 text(

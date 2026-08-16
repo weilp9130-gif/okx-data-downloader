@@ -453,6 +453,33 @@ class OKXClient:
     # ------------------------------------------------------------------
     # 交易对信息
     # ------------------------------------------------------------------
+    def get_instruments(
+        self,
+        inst_type: str = "SWAP",
+        inst_id: Optional[str] = None,
+        inst_family: Optional[str] = None,
+        uly: Optional[str] = None,
+    ) -> List[dict]:
+        """获取交易对列表
+
+        Args:
+            inst_type: SPOT / SWAP / FUTURES / OPTION / MARGIN
+            inst_id: 产品ID，如 BTC-USDT-SWAP（可选，精确匹配）
+            inst_family: 交易品种Family，如 BTC-USDT（可选）
+            uly: 标的指数，如 BTC-USDT（可选）
+
+        Returns:
+            List[dict]: 交易对信息列表
+        """
+        params = {"instType": inst_type}
+        if inst_id:
+            params["instId"] = inst_id
+        if inst_family:
+            params["instFamily"] = inst_family
+        if uly:
+            params["uly"] = uly
+        return self._get("/api/v5/public/instruments", params)
+
     # ------------------------------------------------------------------
     # Open Interest
     # ------------------------------------------------------------------
@@ -573,36 +600,6 @@ class OKXClient:
                 "confirm": d[5] if len(d) > 5 else None,
             })
         return candles
-
-    # ------------------------------------------------------------------
-    # 交易对信息
-    # ------------------------------------------------------------------
-    def get_instruments(
-        self,
-        inst_type: str = "SWAP",
-        inst_id: Optional[str] = None,
-        inst_family: Optional[str] = None,
-        uly: Optional[str] = None,
-    ) -> List[dict]:
-        """获取交易对列表
-
-        Args:
-            inst_type: SPOT / SWAP / FUTURES / OPTION / MARGIN
-            inst_id: 产品ID，如 BTC-USDT-SWAP（可选，精确匹配）
-            inst_family: 交易品种Family，如 BTC-USDT（可选）
-            uly: 标的指数，如 BTC-USDT（可选）
-
-        Returns:
-            List[dict]: 交易对信息列表
-        """
-        params = {"instType": inst_type}
-        if inst_id:
-            params["instId"] = inst_id
-        if inst_family:
-            params["instFamily"] = inst_family
-        if uly:
-            params["uly"] = uly
-        return self._get("/api/v5/public/instruments", params)
 
     # ------------------------------------------------------------------
     # 当前实时资金费率

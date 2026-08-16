@@ -1,6 +1,6 @@
 """WebSocket 断线恢复模块"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import text
@@ -41,10 +41,10 @@ class TradeRecovery:
 
         logger.info("Starting trade recovery: %s from trade_id=%s", inst_id, latest_trade_id)
         downloader = TradesDownloader(client=self.client)
-        # 从最新 trade_id 之后开始恢复，限制页数避免回溯过深
+        # 从最新 trade_id 之后开始恢复，限制页数与回溯时间避免过深
         count = downloader.download_range(
             inst_id=inst_id,
-            start=datetime.now(timezone.utc).replace(year=2026, month=1, day=1),
+            start=datetime.now(timezone.utc) - timedelta(days=7),
             max_pages=20,
             after_trade_id=latest_trade_id,
         )

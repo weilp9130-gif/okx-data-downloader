@@ -1,13 +1,15 @@
-"""REST 历史数据回填入口（Phase 1：仅支持 instruments）
+"""REST 历史数据回填入口
+
+支持 instruments / oi / mark / index / funding / trades / trade_aggregates。
 
 示例：
     python backfill.py --type instruments
-    python backfill.py --type instruments --inst-type SWAP
+    python backfill.py --type mark --inst BTC-USDT-SWAP --bar 1D --start 2024-01-01 --end 2024-02-01
 """
 
 import argparse
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import Config
 from app.database import init_db
@@ -91,7 +93,7 @@ def _resolve_time_range(args) -> tuple:
     if args.start:
         start = parse_date(args.start)
     elif args.limit_days:
-        start = end - __import__("datetime").timedelta(days=args.limit_days)
+        start = end - timedelta(days=args.limit_days)
     else:
         start = end.replace(year=end.year - 1)
     return start, end
