@@ -8,7 +8,6 @@
 
 import asyncio
 import threading
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..utils.logger import get_logger
@@ -142,31 +141,34 @@ class RealtimeManager:
                 self._handle_market_data(data)
 
         def on_reconnect():
-            self._run_recovery()
+            self._run_recovery(reason="WS_RECONNECT")
 
         self.client = OKXWebSocketClient(
             on_message=on_message,
             on_reconnect=on_reconnect,
         )
         # 启动时执行一次恢复
-        self._run_recovery()
+        self._run_recovery(reason="STARTUP")
 
         self._loop.run_until_complete(self._connect_and_run())
 
-    def _run_recovery(self) -> None:
-        """对启用频道执行断线恢复"""
+    def _run_recovery(self, reason: str = "WS_RECONNECT") -> None:
+        """对启用频道执行断线恢复
+
+        OrderBook 不在此处恢复：其 resync 由 OrderBookHandler 状态机在
+        检测到 seq gap 时触发，等待 action=snapshot 后关闭缺口。
+        """
         recovery_types = set()
         for ch in self.channels:
             dt = CHANNEL_RECOVERY_TYPE.get(ch)
-            if dt:
+            if dt and dt != "orderbook":
                 recovery_types.add(dt)
         if not recovery_types:
             return
-        now = datetime.now(timezone.utc)
         for inst_id in self.inst_ids:
             for dt in sorted(recovery_types):
                 try:
-                    self.recovery.recover(dt, inst_id, reason="WS_RECONNECT")
+                    self.recovery.recover(dt, inst_id, reason=reason)
                 except Exception as e:
                     logger.error("Recovery failed: %s %s | %s", dt, inst_id, e)
 
@@ -176,24 +178,28 @@ class RealtimeManager:
         if not inst_id or inst_id not in self.orderbook_handlers:
             return
         handler = self.orderbook_handlers[inst_id]
+        prev_state = handler.state.state
         record = handler.handle(data)
+        # seq gap 后进入 RESYNCING：登记缺口
+        if handler.state.state == "RESYNCING" and prev_state != "RESYNCING":
+            try:
+                self.recovery.orderbook.trigger_resync(
+                    inst_id, reason=handler.state.last_resync_reason or "SEQ_GAP"
+                )
+            except Exception as e:
+                logger.error("OrderBook gap registration failed: %s | %s", inst_id, e)
         if record and self.orderbook_writer:
             record["__type"] = "snapshot"
             self.orderbook_writer.put(record)
+            # 新 snapshot 到达且此前有 resync：关闭 OPEN 缺口
+            if record.get("snapshot_type") == "RESYNC":
+                try:
+                    self.recovery.orderbook.mark_snapshot_ready(inst_id)
+                except Exception as e:
+                    logger.error("OrderBook gap close failed: %s | %s", inst_id, e)
 
     def _handle_market_data(self, data: dict) -> None:
-        arg = data.get("arg", {})
-        channel = arg.get("channel", "")
-        if channel.startswith("candle"):
-            inst_id = arg.get("instId")
-            if not inst_id:
-                return
-            bar = channel[len("candle"):]
-            records = self.market_data_handler.handle_candles_with_inst(
-                data, bar, inst_id, datetime.now(timezone.utc)
-            )
-        else:
-            records = self.market_data_handler.handle(data)
+        records = self.market_data_handler.handle(data)
         for item in records:
             item["__target"] = item["target"]
             self.market_data_writer.put(item)

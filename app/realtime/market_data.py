@@ -6,7 +6,6 @@ Phase 7：处理 open-interest、funding-rate、mark-price、index-tickers
 
 import re
 from datetime import datetime, timezone
-from typing import Optional
 
 from ..utils.logger import get_logger
 from ..utils.time_utils import ms_to_datetime
@@ -46,7 +45,11 @@ class MarketDataHandler:
             return self._handle_index_tickers(raw_data, received_at)
         m = CANDLE_CHANNEL_RE.match(channel)
         if m:
-            return self._handle_candles(raw_data, m.group(1), received_at)
+            inst_id = arg.get("instId")
+            if not inst_id:
+                logger.warning("candle 频道缺少 instId: channel=%s", channel)
+                return []
+            return self.handle_candles_with_inst(data, m.group(1), inst_id, received_at)
 
         return []
 
@@ -166,19 +169,13 @@ class MarketDataHandler:
         return records
 
     # ------------------------------------------------------------------
-    def _handle_candles(self, raw_list: list, bar: str, received_at: datetime) -> list:
-        """处理 candle{bar} 频道（数组格式 [ts, o, h, l, c, vol, ...]）
-
-        注：需依赖 WS 消息 arg 中的 instId，data 项为纯数组。
-        """
-        records = []
-        # candle 频道的 instId 来自 arg，需要由调用方注入
-        return records
-
     def handle_candles_with_inst(
         self, data: dict, bar: str, inst_id: str, received_at: datetime
     ) -> list:
-        """带 instId 的 K线处理（由 manager 在知道 arg.instId 时调用）"""
+        """处理 candle{bar} 频道（data 项为数组 [ts, o, h, l, c, vol, ...]）
+
+        instId 只出现在 arg 中，需由调用方传入。
+        """
         raw_list = data.get("data", [])
         records = []
         for raw in raw_list:

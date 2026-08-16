@@ -319,13 +319,22 @@ class TimeRangeRecovery(BaseRecovery):
             data_type, inst_id, reason=reason,
             from_ts=start, to_ts=end,
         )
+        # 先登记缺口，恢复结果再更新其状态（防重复由 DataGapStore 保证）
+        self.gaps.register_open(data_type, inst_id, start, end, gap_type=reason)
+
         count = 0
         status = RECOVERY_STATUS_RECOVERED
         error = None
         try:
             if data_type == "oi":
+                # OKX 无历史 OI 端点，只能取当前快照，无法覆盖 [start, end]
                 downloader = OpenInterestDownloader(client=self.client)
                 count = downloader.download(inst_id=inst_id, bar=bar)
+                status = RECOVERY_STATUS_PARTIAL
+                error = (
+                    "OKX 无历史 open-interest 端点，仅回补当前快照，"
+                    f"无法覆盖 {start.isoformat()} ~ {end.isoformat()}"
+                )
             elif data_type == "mark":
                 downloader = MarkPriceDownloader(client=self.client)
                 count = downloader.download_range(
@@ -349,9 +358,10 @@ class TimeRangeRecovery(BaseRecovery):
             error = str(e)
             logger.error("TimeRange recovery failed: %s %s | %s", data_type, inst_id, e)
 
-        if count > 0 or status == RECOVERY_STATUS_RECOVERED:
+        if status == RECOVERY_STATUS_RECOVERED:
             self.gaps.mark_recovered(data_type, inst_id, start, end, count)
-        elif status == RECOVERY_STATUS_UNRECOVERABLE:
+        else:
+            # PARTIAL_RECOVERED / UNRECOVERABLE 都不能声称缺口已补齐
             self.gaps.mark_unrecoverable(
                 data_type, inst_id, start, end, error_message=error
             )
@@ -371,24 +381,47 @@ class OrderBookRecovery(BaseRecovery):
 
     data_type = "orderbook"
 
+    # seq gap 检测到时无法确定精确缺口区间，用固定窗口近似标记
+    GAP_WINDOW_SECONDS = 5
+
     def __init__(self):
         super().__init__()
 
     def trigger_resync(self, inst_id: str, reason: str = "SEQ_GAP") -> None:
-        """登记 OrderBook seq 缺口并记录事件（实际 resync 由 handler 状态机完成）"""
+        """登记 OrderBook seq 缺口并记录事件
+
+        实际 resync 由 OrderBookHandler 状态机完成（等待 action=snapshot），
+        因此事件状态为 PARTIAL_RECOVERED，缺口保持 OPEN 直到新快照到达。
+        """
         now = datetime.now(timezone.utc)
+        start = now - timedelta(seconds=self.GAP_WINDOW_SECONDS)
         recovery_id = self.events.start(
             "orderbook", inst_id, reason=reason,
-            from_ts=now - timedelta(seconds=5), to_ts=now,
+            from_ts=start, to_ts=now,
         )
         self.gaps.register_open(
-            "orderbook", inst_id, now - timedelta(seconds=5), now,
-            gap_type=reason,
+            "orderbook", inst_id, start, now, gap_type=reason,
         )
         self.events.finish(
-            recovery_id, RECOVERY_STATUS_RECOVERED, 0,
+            recovery_id, RECOVERY_STATUS_PARTIAL, 0,
             error_message="triggered resync; waiting for action=snapshot",
         )
+
+    def mark_snapshot_ready(self, inst_id: str) -> None:
+        """新 snapshot 到达后关闭该 inst 的 OPEN orderbook 缺口"""
+        now = datetime.now(timezone.utc)
+        with self.gaps.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE data_gaps
+                    SET status = 'RECOVERED', recovered_at = :now, recovery_rows = 0
+                    WHERE data_type = 'orderbook' AND inst_id = :inst_id
+                      AND status = 'OPEN'
+                    """
+                ),
+                {"inst_id": inst_id, "now": now},
+            )
 
 
 class RecoveryManager:
