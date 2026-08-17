@@ -116,6 +116,9 @@ def init_db() -> None:
         IndexPrice,
         IndexPriceSyncState,
         Instrument,
+        LatencyProbeStats,
+        LatencySample,
+        LatencySummary,
         MarkPrice,
         MarkPriceSyncState,
         MarketDataProvenance,
@@ -201,6 +204,12 @@ def _create_hypertables(engine: Engine) -> None:
             ))
             conn.execute(text(
                 "SELECT create_hypertable('order_book_factors', 'ts', "
+                "chunk_time_interval => INTERVAL '1 week', "
+                "if_not_exists => TRUE, migrate_data => TRUE)"
+            ))
+            # latency_probe 延迟样本（分区键 sample_ts，chunk 1 week）
+            conn.execute(text(
+                "SELECT create_hypertable('latency_samples', 'sample_ts', "
                 "chunk_time_interval => INTERVAL '1 week', "
                 "if_not_exists => TRUE, migrate_data => TRUE)"
             ))

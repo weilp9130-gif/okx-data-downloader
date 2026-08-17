@@ -63,7 +63,7 @@ class TestTradesRealtimeHandler(unittest.TestCase):
 class TestOKXWebSocketClient(unittest.TestCase):
     def test_client_init(self):
         client = OKXWebSocketClient()
-        self.assertEqual(client.url, "wss://ws.okx.com:8443/ws/v5/public")
+        self.assertEqual(client.url, "wss://ws.okx.com/ws/v5/public")
 
 
 class TestOrderBookState(unittest.TestCase):

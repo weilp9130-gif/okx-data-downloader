@@ -23,10 +23,17 @@ okx_data_downloader
 │   ├── config.py        # 配置模块（dataclass + .env）
 │   ├── database.py      # 数据库连接（SQLAlchemy Engine/Session + Docker引导）
 │   ├── db_docker.py     # Docker数据库引导（下载前自动检测/启动timescale容器）
-│   ├── models.py        # ORM数据模型（candles/funding_rates/download_state）
+│   ├── models.py        # ORM数据模型（candles/funding_rates/download_state 等）
 │   ├── okx_client.py    # OKX API客户端（限速/重试/线程本地Session/代理池）
 │   ├── proxy_pool.py    # IP代理池（每IP平滑限速/健康管理/IP去重探测）
 │   ├── dynamic_pool.py  # ★动态IP代理池（自动发现/测IP/应用listeners）
+│   ├── latency/         # ★行情延迟探针（独立于实时管线）
+│   │   ├── __init__.py
+│   │   ├── metrics.py   # 分位数 / WindowSummarizer / 系统级计数器注册表
+│   │   ├── clock.py     # REST 时钟校准（NTP midpoint + min-RTT）
+│   │   ├── ws_probe.py  # 唯一 recv_loop / PingProbe / seq 检测 / notice
+│   │   ├── mock_strategy.py # none/light/heavy_v1 独立 worker
+│   │   └── persistence.py   # LatencySampleWriter + summaries/stats UPSERT
 │   ├── downloader/
 │   │   ├── __init__.py
 │   │   ├── candles.py   # K线下载模块（缺失窗口检测/回溯/批量入库）
@@ -38,6 +45,7 @@ okx_data_downloader
 ├── backfill.py          # ★入口：REST 历史回填（instruments/oi/mark/index/funding/trades/trade_aggregates/all）
 ├── sync_continuous.py   # ★入口：K线连续同步（先全量追赶，再低资源实时同步，含IP代理池）
 ├── sync_realtime.py     # ★入口：WebSocket 实时采集（trades/orderbook/oi/funding/mark/index/kline）
+├── latency_probe.py     # ★入口：行情延迟探针（延迟分布/窗口百分位/策略基准）
 ├── quality_report.py    # ★入口：数据质量报告（三层校验 + 索引验证）
 ├── tests/               # 单元测试（离线，python -m unittest discover -s tests）
 ├── pyproject.toml       # 包元数据/依赖（可选 pip install -e .）
@@ -504,6 +512,169 @@ dispose_engine()
 # 离线测试（不依赖网络/数据库）
 python -m unittest discover -s tests -v
 ```
+
+## 行情延迟探针（latency_probe）— Market-Data Latency Probe
+
+独立脚本 `latency_probe.py` + `app/latency/` 包，持续测量 OKX WebSocket 行情
+到达本机的延迟**分布**，长期入库（PostgreSQL），按窗口产出百分位汇总，用于快节奏
+量化前的延迟画像与昼夜/尖峰分析。**完全独立于现有实时采集管线**（不改
+`sync_realtime.py` / `app/realtime/okx_ws.py` / `manager.py`）。
+
+### 用法（Usage）
+
+```bash
+python latency_probe.py --insts BTC-USDT-SWAP --channels trades,bbo-tbt \
+    --duration 300 --summary-interval 60 --ping-interval 1 --ping-timeout 5 \
+    --http-rtt-interval 30 --clock-probes 20 --strategy-benchmark none
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--insts` | `BTC-USDT-SWAP` | 逗号分隔的产品ID |
+| `--channels` | `trades,bbo-tbt` | `trades/bbo-tbt/books5/books/books-l2-tbt/books50-l2-tbt/mark-price/index-tickers/tickers`；非法频道启动报错；VIP 频道订阅失败剔除不退出（除非全部失败） |
+| `--duration` | `300` | 秒；`0` = 无限 |
+| `--summary-interval` | `60` | 汇总窗口（秒），固定 UTC + 延后一个窗口关闭 |
+| `--ping-interval` | `1` | PingProbe 频率（秒） |
+| `--ping-timeout` | `max(3×interval, 5)` | pending ping 超时（超时 → `ws_ping_missed`） |
+| `--http-rtt-interval` | `30` | REST 时钟/RTT 探测频率；`0` = 禁用周期探测 |
+| `--clock-probes` | `20` | 启动串行校准探测；`0` = 禁用（无 corrected） |
+| `--strategy-benchmark` | `none` | `none` / `light` / `heavy`（heavy 运行 `heavy_v1`，独立 worker） |
+
+WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
+`wss://ws.okx.com:443/ws/v5/public`；可用环境变量 `OKX_WS_URL` 指定单个端点。
+日志：`logs/latency_probe_*.log`；SIGINT/SIGTERM 优雅停止（flush 剩余、最终汇总、
+最终失败样本对账）。
+
+### 指标（Metrics）
+
+| 指标 | 时钟 | 定义 | channel |
+|------|------|------|---------|
+| `ws_ping_rtt` | monotonic | 应用层文本 `"ping"` → OKX `"pong"` RTT；唯一 pending ping + 超时 | `__ws__` |
+| `http_rtt` | monotonic 差值 | REST `/api/v5/public/time` 往返（进程观测的 wall-to-wall，可能含 DNS/TCP/TLS/HTTP/服务端处理/连接复用；**非纯网络 RTT**，首请求与后续差异可能巨大）；`clock_offset_ms` 仅诊断 | `__http__` |
+| `raw_ws_receive_latency` | wall | `(recv_ns − exchange_ts_ms×1e6)/1e6`，逐 data 项，同一消息共享 recv_ns。**端到端行情年龄，≠ 网络延迟** | 实际频道 |
+| `corrected_ws_receive_latency` | wall | `raw + 样本自身 clock_offset_ms`；**只存在于 summaries / 用户 SQL**，禁止落 `latency_samples` | 实际频道 |
+| `strategy_latency` | monotonic | `signal_mono − arrival_mono`，含 worker 排队（端到端）；feature+model 之和 ≠ strategy_latency | 触发频道 |
+| `strategy_feature_latency` / `strategy_model_latency` | monotonic | `heavy_v1` 阶段耗时 | 触发频道 |
+| `min/mean/p50/p95/p99/max` | — | 线性插值分位数（numpy 语义，纯 Python） | — |
+| `jitter_ms` | — | **样本标准差** `sqrt(Σ(x−mean)²/(n−1))`，`n<2 → 0` | — |
+
+### 关键语义（Semantics & Statistics）
+
+- **行情年龄警告**：`raw_ws_receive_latency` 是从交易所事件 ts 到应用 `recv()`
+  返回的**全链路年龄**（含交易所内部处理/聚合、WS 排队、网络、OS socket 缓冲、
+  Python 运行时），不是网络延迟。p99=25ms 不表示"网络 25ms"。不同频道 ts 语义
+  不同（trades=成交时间；bbo-tbt=撮合引擎盘口生成时间；books*=订单簿生成时间），
+  禁止无条件横向比较。
+- **corrected**：`clock_offset_ms = OKX server time − 本地`（本机快 → 负）；
+  `corrected = raw + clock_offset_ms`，**必须用样本自身的 offset**（禁止窗口级
+  校正）。`clock_offset_ms` 是 **REST server time based clock offset estimate**，
+  非精确 WS 时钟偏移。
+- **PingProbe 与 RFC6455 是两个层次**：OKX 应用层文本 `"ping"`/`"pong"` 与
+  WebSocket 控制帧 Ping/Pong 无关；PingProbe 只测前者，`ws_ping_rtt/2` 不得当
+  单向延迟。`ws_messages_received` 仅在 `recv()` 成功返回**应用层消息**时 +1；
+  ConnectionClosed / timeout / 协议错误 / cancellation 一律不计。
+- **jitter**：样本标准差（`n<2 → 0`），`statistics.pstdev` 被禁止。
+- **统计恒等式（market 样本范围）**：`samples_parsed = market_samples_received
+  − parse_errors`；`queued = samples_parsed − dropped`。`market_samples_received/
+  samples_parsed/queued/dropped/written/parse_errors` **只统计行情样本**（
+  `raw_ws_receive_latency`），绝不含 `ws_ping_rtt/http_rtt/strategy_*`。
+- **时间戳**：`sample_ts = recv_ts`（本地接收墙钟时刻）；HTTP 探测
+  `sample_ts = t1`（REST 完成时刻）；`arrival_mono_ns` 只存在内存，**禁止持久化**。
+- **负延迟**：不截断；`negative_raw_latency_count`（raw<0 → 交易所/本地时间戳
+  不一致）与 `negative_corrected_latency_count`（校正后仍<0）分开计数 + 限频告警。
+- **written / write_errors 窗口**：`written` 按每行 `sample_ts` 窗口归属（跨窗口
+  批次拆分）；`write_errors` 按**错误发生时间**窗口、每次失败 attempt +1；DB 失败
+  绝不入 `dropped`。`written` 允许最终一致（P1-21）：已关闭窗口在 writer
+  drain/停止前仍可收到迟到 written 更新；`written < samples_parsed` 不得直接视为
+  丢数据；停止时 writer drain 对账剩余 queued 行并显式报告
+  `final_write_failed_samples`。
+- **seq 连续性（P0-12）**：仅 `books/books-l2-tbt/books50-l2-tbt` 参与。
+  `snapshot` 只更新 `last_seq_id`，**永不**计 gap、**永不**计 reset（snapshot
+  回退不是 reset）；`update` 判定顺序固定 `if prev_seq_id != last_seq_id: gap
+  elif seq_id < prev_seq_id: reset`（gap 优先、禁止 reset 优先）；无 action 不猜；
+  无 prior state 不计；按 `(session, channel, inst_id)` 隔离；重连清空 seq 状态、
+  **不重置 clock_offset**；连接空洞不计 seq gap。
+- **身份字段（P0-9）**：`inst_id="__system__"`（常量 `SYSTEM_INST_ID`）；channel：
+  http_rtt=`__http__`、ws_ping_rtt=`__ws__`、strategy_*=触发频道；session：
+  http_rtt=0（非 WS）、ws_ping_rtt/strategy_*=当前 WS session。`session=0` 表示
+  非 WS/session-independent，`>=1` 为真实 WS session；`WHERE session > 0` 干净选择
+  WS 数据。
+- **PingProbe 样本数**：约为 `duration / ping_interval`；发生超时后由
+  `ping_timeout` 限制节奏，冒烟测试**不硬断言**样本数。
+- **实测协议（P1-24）**：应用层 ping→pong 为文本 `"ping"`/`"pong"`；subscribe
+  ack 为 `{"event":"subscribe","arg":{...},"connId":...}`；**bbo-tbt/books* 的
+  data 项内不含 `instId`**（取自消息 `arg.instId`）；books* 带 `action` +
+  `seqId`/`prevSeqId`；checksum 已弃用（2026-06-23 起恒为 0，连续性验证用
+  seqId/prevSeqId）。
+- **SESSION_START**：每次成功连接+订阅后输出结构化日志
+  （session/conn_id/start_ts/pid/python/platform/cpu_count/insts/channels/
+  strategy/workload/ping_*/clock_offset_ms）。
+- **运行时队列遥测（P1-23）**：每汇总窗口与停止时日志
+  `writer_queue_depth/writer_queue_capacity/strategy_queue_depth/
+  strategy_queue_capacity` 及进程 CPU time/利用率（不进 DB）。
+
+### 数据库表（3 表）
+
+- `latency_samples`（**hypertable**，分区键 `sample_ts`，chunk 1 周）：PK
+  `(id, sample_ts)`；`id` 自增 PK 首位（BIGSERIAL，server-side default）；含
+  `session/source/inst_id/channel/metric/value_ms/exchange_ts/recv_ts/
+  clock_offset_ms`；`metric` 仅 raw（`corrected_ws_receive_latency` 禁止落表）。
+  追加写入，无 ON CONFLICT。
+- `latency_summaries`（普通表）：PK `(window_start, source, channel, metric,
+  inst_id)`；min/mean/p50/p95/p99/max/jitter_ms；UPSERT；由内存聚合器产出（禁
+  SQL 反查 samples）。corrected 汇总只用 `clock_offset_ms` 非 NULL 的样本（各用
+  自身 offset）；全部 NULL 则跳过 corrected + INFO 日志。
+- `latency_probe_stats`（普通表，系统级）：PK `(window_start, source, metric)`；
+  全部计数器（含 `sequence_reset_count / negative_raw|corrected_latency_count /
+  http_probe_errors / ws_connect_count / ws_reconnect_count / notice_received /
+  strategy_events_dropped`）。
+
+### 分析 SQL（Analysis SQL）
+
+```sql
+-- 窗口汇总
+SELECT window_start, channel, metric, n, min_ms, p50_ms, p95_ms, p99_ms, max_ms, jitter_ms
+FROM latency_summaries ORDER BY window_start;
+
+-- p99_of_p99 = 分钟窗口 p99 的 p99，不是原始小时 p99
+SELECT date_trunc('hour', window_start) AS h, metric,
+       percentile_cont(0.99) WITHIN GROUP (ORDER BY p99_ms) AS p99_of_p99
+FROM latency_summaries GROUP BY h, metric;
+
+-- 样本级 corrected（SQL 派生）
+SELECT sample_ts, value_ms, value_ms + clock_offset_ms AS corrected_ms
+FROM latency_samples
+WHERE metric = 'raw_ws_receive_latency' AND clock_offset_ms IS NOT NULL;
+
+-- session 级重连/异常追踪
+SELECT session, min(sample_ts) AS first_ts, max(sample_ts) AS last_ts, count(*) AS samples
+FROM latency_samples GROUP BY session ORDER BY first_ts;
+
+-- 连接级指标隔离
+SELECT * FROM latency_samples WHERE inst_id = '__system__' AND session = 0;
+```
+
+### A/B/C/D 基准（Benchmark）
+
+- A = 仅 trades（OKX/网络/OS 基线）；B = 仅 bbo-tbt（BBO 基线）；C =
+  trades+bbo-tbt；D = C + `--strategy-benchmark heavy`。
+- **C − A/B** 只解释为"同机同网下增量接收路径压力"，**不隔离单一频道因果贡献**
+  （频道频率/大小/批处理/ts 语义不同）。
+- **D − C** = 当前 CPU/Python/worker/队列架构下策略负载对接收路径的影响
+  （不是策略延迟、不是网络延迟）；D≈C 是好结果，D>>C 需查 CPU 争用/GIL/事件循环
+  调度/队列压力。
+- **运行顺序随机化/轮换（P1-22）**：不要求严格 A→B→C→D，推荐 A C B D /
+  C D A B / B A D C；各轮保持在相近 UTC 时段；绝不从单次顺序推断 workload 因果。
+- 丢弃事件 >0（`strategy_events_dropped > 0`）的 D 运行标记 **DEGRADED**，不得与
+  干净 D 运行比较。时长建议 10 min / 1 h / 24 h 每轮，观察 CPU/RAM/load。
+
+### 存储容量 / Retention / Checksum
+
+- **容量估算以实测 `samples_parsed/s` 为准**，不用本文档示例的 500 samples/s
+  （≈43M 行/天）当预算；生产长跑必须配置 TimescaleDB retention/压缩；v1 永不
+  自动删除。
+- **checksum 有意不使用**：2026-06-23 起 OKX 弃用 books/books-l2-tbt/
+  books50-l2-tbt 的 checksum 校验（字段恒为 0），连续性验证用 seqId/prevSeqId。
 
 ## 日志规范
 

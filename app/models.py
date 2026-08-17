@@ -11,6 +11,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Float,
     Index,
     Integer,
     Numeric,
@@ -669,3 +670,87 @@ class DataGap(Base):
 
     def __repr__(self) -> str:
         return f"<DataGap(type={self.data_type}, inst={self.inst_id}, status={self.status})>"
+
+
+class LatencySample(Base):
+    """延迟探针原始样本（latency_probe 专用，TimescaleDB hypertable）
+
+    只存 raw 指标（ws_ping_rtt / http_rtt / raw_ws_receive_latency /
+    strategy_*）；`corrected_ws_receive_latency` 禁止落表（P0），只存在于
+    latency_summaries / 内存聚合 / 用户 SQL。
+    `sample_ts` = 本地接收时刻（WS 为 recv 时刻，HTTP 为 REST 完成时刻 t1）；
+    `session` = 0 表示非 WS/session-independent，>=1 为真实 WS session。
+    """
+
+    __tablename__ = "latency_samples"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)  # PK 首位
+    sample_ts = Column(DateTime(timezone=True), primary_key=True)  # 分区键 (= recv_ts)
+    session = Column(Integer, nullable=False)
+    source = Column(String(20), nullable=False)
+    inst_id = Column(String(50), nullable=False)      # '__system__' for __http__/__ws__
+    channel = Column(String(32), nullable=False)      # trades/bbo-tbt/.../__ws__/__http__
+    metric = Column(String(32), nullable=False)       # raw only
+    value_ms = Column(Float, nullable=False)          # DOUBLE PRECISION
+    exchange_ts = Column(DateTime(timezone=True))     # WS 行情 ts；rtt 类为 NULL
+    recv_ts = Column(DateTime(timezone=True))         # 本地接收墙钟时刻
+    clock_offset_ms = Column(Float)                   # 每样本 offset 快照（http 为诊断）
+
+    __table_args__ = (
+        Index("ix_latency_samples_inst_ts", "inst_id", "sample_ts"),
+        Index("ix_latency_samples_channel_metric", "channel", "metric", "sample_ts"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<LatencySample(inst={self.inst_id}, channel={self.channel}, "
+            f"metric={self.metric}, value={self.value_ms}ms)>"
+        )
+
+
+class LatencySummary(Base):
+    """延迟探针窗口汇总（普通表，内存聚合 UPSERT，禁 SQL 反查 samples）"""
+
+    __tablename__ = "latency_summaries"
+
+    window_start = Column(DateTime(timezone=True), nullable=False)
+    source = Column(String(20), nullable=False)
+    inst_id = Column(String(50), nullable=False)
+    channel = Column(String(32), nullable=False)
+    metric = Column(String(32), nullable=False)       # 含 corrected_ws_receive_latency（派生层）
+    n = Column(BigInteger, nullable=False)
+    min_ms = Column(Float, nullable=False)
+    mean_ms = Column(Float, nullable=False)
+    p50_ms = Column(Float, nullable=False)
+    p95_ms = Column(Float, nullable=False)
+    p99_ms = Column(Float, nullable=False)
+    max_ms = Column(Float, nullable=False)
+    jitter_ms = Column(Float, nullable=False)         # 样本标准差；n<2 -> 0
+
+    __table_args__ = (
+        PrimaryKeyConstraint("window_start", "source", "channel", "metric", "inst_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<LatencySummary(window={self.window_start}, {self.channel}/"
+            f"{self.metric}, n={self.n}, p99={self.p99_ms})>"
+        )
+
+
+class LatencyProbeStats(Base):
+    """延迟探针系统级计数器（普通表，不按 inst/channel/session 拆分）"""
+
+    __tablename__ = "latency_probe_stats"
+
+    window_start = Column(DateTime(timezone=True), nullable=False)
+    source = Column(String(20), nullable=False)
+    metric = Column(String(32), nullable=False)
+    value = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("window_start", "source", "metric"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LatencyProbeStats(window={self.window_start}, {self.metric}={self.value})>"

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import time
 from typing import Callable, List, Optional
 
@@ -11,7 +12,11 @@ from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-OKX_WS_URL = "wss://ws.okx.com:8443/ws/v5/public"
+# 默认走 443 端口（wss://ws.okx.com:8443 在某些网络被阻断，443 更通用）。
+# 可通过环境变量 OKX_WS_URL 覆盖。
+OKX_WS_URL = os.getenv(
+    "OKX_WS_URL", "wss://ws.okx.com/ws/v5/public"
+)
 
 
 class OKXWebSocketClient:
