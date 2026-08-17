@@ -203,6 +203,61 @@ class TestDataConflictDetector(unittest.TestCase):
         self.detector.detect_trades([self._row("999")])
         self.assertEqual(self.detector.open_count("trades", self.INST), 1)
 
+    def _row_with_source(self, px: str, source: str):
+        row = self._row(px)
+        row["source"] = source
+        return row
+
+    def test_ws_authoritative_policy_skips_conflict(self):
+        """回归：库中已有 WS 值且 incoming 为 REST（不同 sz）时，按 WS 权威策略
+        保留 WS 值、跳过写入、不登记冲突。"""
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from app.models import Trade
+        from app.conflict import CONFLICT_POLICY
+
+        if CONFLICT_POLICY != "ws":
+            self.skipTest("DATA_CONFLICT_POLICY 非 ws，跳过")
+
+        # 先写一条 WS 值
+        ws_row = self._row_with_source("100", "WS")
+        with self.detector.engine.begin() as conn:
+            conn.execute(
+                pg_insert(Trade).values([ws_row]).on_conflict_do_nothing()
+            )
+
+        # REST 回填同 tradeId 不同 sz -> 不登记冲突，返回 safe 为空（保留 WS 值）
+        rest_row = self._row_with_source("999", "REST")
+        safe, conflicts = self.detector.detect_trades([rest_row])
+        self.assertEqual(conflicts, [])
+        self.assertEqual(safe, [])
+        self.assertEqual(self.detector.open_count("trades", self.INST), 0)
+
+    def test_resolve_marks_open(self):
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from app.models import Trade
+        from sqlalchemy import text
+
+        with self.detector.engine.begin() as conn:
+            conn.execute(
+                pg_insert(Trade).values([self._row("100")]).on_conflict_do_nothing()
+            )
+        self.detector.detect_trades([self._row("999")])
+        self.assertEqual(self.detector.open_count("trades", self.INST), 1)
+
+        # 只解决本测试实例的冲突，避免污染其他 inst 的真实冲突
+        with self.detector.engine.connect() as conn:
+            ids = [
+                r[0] for r in conn.execute(
+                    text(
+                        "SELECT id FROM data_conflicts "
+                        "WHERE status = 'OPEN' AND inst_id = :i"
+                    ),
+                    {"i": self.INST},
+                ).fetchall()
+            ]
+        self.detector.resolve(ids=ids, note="test cleanup")
+        self.assertEqual(self.detector.open_count("trades", self.INST), 0)
+
 
 class TestRetentionConfig(unittest.TestCase):
     def test_defaults_disabled(self):

@@ -262,18 +262,29 @@ SELECT * FROM data_gaps WHERE status = 'OPEN';
 ### 2.8 Raw 数据冲突与 Retention（Phase 10）
 
 **DATA_CONFLICT**：Raw 数据是最终事实来源，禁止静默覆盖。写入 `trades` 前会比对
-`raw_hash`：
+核心字段 `raw_hash`（`{instId, tradeId, px, sz, side, ts}`，忽略 WS/REST 传输元数据
+`seqId/count`）：
 
 ```
 相同业务键 (inst_id, trade_id, ts)
     ├── raw_hash 相同 → duplicate（ON CONFLICT DO NOTHING）
-    └── raw_hash 不同 → DATA_CONFLICT（登记 data_conflicts，跳过写入，需人工确认）
+    └── raw_hash 不同 → 按 DATA_CONFLICT_POLICY 处理
 ```
+
+对账策略 `DATA_CONFLICT_POLICY`（默认 `ws`）：
+
+| 策略 | 行为 |
+|------|------|
+| `ws`（默认） | WS 实时通道为权威：库中已有 WS 值且 incoming 为 REST 时保留 WS 值、跳过写入、不登记冲突。OKX 对 `count>1` 聚合成交的 WS/REST `sz` 口径不一致属已知行为 |
+| `strict` | 严格模式：任何同键不同 payload 都登记 `data_conflicts`，需人工裁决 |
 
 ```sql
 -- 查看未处理冲突
 SELECT table_name, inst_id, biz_key, existing_hash, incoming_hash, detected_at
 FROM data_conflicts WHERE status = 'OPEN';
+
+-- 按 WS 权威策略标记已解决（或指定 id）
+UPDATE data_conflicts SET status = 'RESOLVED' WHERE status = 'OPEN';
 ```
 
 **Retention**：默认关闭。启用前应先导出冷存储（Retention != 永久删除）。

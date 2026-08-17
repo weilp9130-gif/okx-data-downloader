@@ -3,11 +3,17 @@
 Raw 数据是最终事实来源，禁止静默覆盖：
     相同 business key
         ├── raw_hash 相同 → duplicate（ON CONFLICT DO NOTHING）
-        └── raw_hash 不同 → DATA_CONFLICT（登记冲突，保留原值）
+        └── raw_hash 不同 → 按对账策略处理（DATA_CONFLICT_POLICY）
+
+对账策略（DATA_CONFLICT_POLICY，默认 ws）：
+    ws    = WS 实时通道为权威：冲突时保留库中 WS 值，REST 差异视为噪声跳过，
+            不登记冲突（OKX 对 count>1 聚合成交的 WS/REST sz 口径不一致）
+    strict= 严格模式：任何同键不同 payload 都登记 data_conflicts，需人工裁决
 """
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -20,6 +26,9 @@ logger = get_logger(__name__)
 
 CONFLICT_STATUS_OPEN = "OPEN"
 CONFLICT_STATUS_RESOLVED = "RESOLVED"
+
+# 对账策略：ws（默认）/ strict
+CONFLICT_POLICY = os.getenv("DATA_CONFLICT_POLICY", "ws").strip().lower()
 
 # trades 的核心业务字段：REST 与 WS 两条链路的 payload 在传输元数据
 # （seqId / count 等）上必然不同，但这些字段不代表成交本身。
@@ -68,6 +77,7 @@ class DataConflictDetector:
 
         safe_rows: List[dict] = []
         conflicts: List[dict] = []
+        ws_kept = 0
         for row in rows:
             key = (row["inst_id"], row["trade_id"], row["ts"])
             prev = existing.get(key)
@@ -77,6 +87,15 @@ class DataConflictDetector:
             prev_hash = prev.get("raw_hash")
             new_hash = row.get("raw_hash")
             if prev_hash and new_hash and prev_hash != new_hash:
+                # WS 权威策略：库中已有 WS 值且 incoming 为 REST 时，
+                # 保留 WS 值、跳过 REST 写入、不登记冲突
+                if (
+                    CONFLICT_POLICY == "ws"
+                    and prev.get("source") == "WS"
+                    and row.get("source") == "REST"
+                ):
+                    ws_kept += 1
+                    continue
                 conflicts.append({
                     "table_name": "trades",
                     "inst_id": row["inst_id"],
@@ -91,6 +110,11 @@ class DataConflictDetector:
                 # hash 相同视为 duplicate，交由 ON CONFLICT 处理
                 safe_rows.append(row)
 
+        if ws_kept:
+            logger.info(
+                "对账策略 WS 权威: 保留 %d 条 WS 实时值，跳过 REST 差异写入",
+                ws_kept,
+            )
         if conflicts:
             self.register(conflicts)
         return safe_rows, conflicts
@@ -105,7 +129,7 @@ class DataConflictDetector:
             rows = conn.execute(
                 text(
                     """
-                    SELECT inst_id, trade_id, ts, raw_hash, raw_json
+                    SELECT inst_id, trade_id, ts, raw_hash, raw_json, source
                     FROM trades
                     WHERE inst_id = ANY(:inst_ids)
                       AND trade_id = ANY(:trade_ids)
@@ -189,3 +213,41 @@ class DataConflictDetector:
             params["inst_id"] = inst_id
         with self.engine.connect() as conn:
             return int(conn.execute(text(sql), params).scalar() or 0)
+
+    def resolve(self, ids: Optional[List[int]] = None, note: str = "") -> int:
+        """将指定（或全部 OPEN）冲突标记为 RESOLVED
+
+        Args:
+            ids: 冲突 id 列表；None 表示全部 OPEN
+            note: 解决备注（写入 status 前的说明，简单记录用日志即可）
+
+        Returns:
+            int: 更新的条数
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            if ids:
+                result = conn.execute(
+                    text(
+                        """
+                        UPDATE data_conflicts
+                        SET status = 'RESOLVED', detected_at = :now
+                        WHERE status = 'OPEN' AND id = ANY(:ids)
+                        """
+                    ),
+                    {"ids": ids, "now": now},
+                )
+            else:
+                result = conn.execute(
+                    text(
+                        """
+                        UPDATE data_conflicts
+                        SET status = 'RESOLVED', detected_at = :now
+                        WHERE status = 'OPEN'
+                        """
+                    ),
+                    {"now": now},
+                )
+        updated = result.rowcount or 0
+        logger.info("DATA_CONFLICT 已解决 %d 条%s", updated, f"（{note}）" if note else "")
+        return updated
