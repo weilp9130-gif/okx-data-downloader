@@ -496,11 +496,12 @@ class CandleDownloader:
         except ValueError:
             pass
         chunks: List[Tuple[int, int]] = []
-        chunk_ms = 7 * self.DAY_MS  # 7天一片：足够打满线程池，又控制任务总量
+        # 1天一片：只拉被判定为不完整的日期，减少对"几乎完整"日期的冗余拉取；
+        # 任务粒度更细，配合窗口级并行能更充分打满IP池。
         for ws, we in windows:
             cur = ws
             while cur < we:
-                cend = min(cur + chunk_ms, we)
+                cend = min(cur + self.DAY_MS, we)
                 chunks.append((cur, cend))
                 cur = cend
         return chunks
