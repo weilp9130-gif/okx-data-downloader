@@ -84,7 +84,11 @@ class DataConflictDetector:
             if prev is None:
                 safe_rows.append(row)
                 continue
-            prev_hash = prev.get("raw_hash")
+            # existing hash 从 raw_json 实时重算：库中历史行的 raw_hash 列
+            # 可能由旧版 hash 公式（整包 canonical_hash）写入，直接比存储列
+            # 会把"核心数据一致但公式不同"的重复行误判为冲突。
+            prev_raw = prev.get("raw_json")
+            prev_hash = trade_core_hash(prev_raw) if isinstance(prev_raw, dict) else prev.get("raw_hash")
             new_hash = row.get("raw_hash")
             if prev_hash and new_hash and prev_hash != new_hash:
                 # WS 权威策略：库中已有 WS 值且 incoming 为 REST 时，
