@@ -15,7 +15,7 @@ from app.database import init_db
 from app.okx_client import OKXClient
 from app.realtime.manager import RealtimeManager
 from app.utils.logger import get_logger
-from app.utils.okx_utils import get_swap_contracts
+from app.download_scope import load_scope, resolve_instruments, scope_default
 
 logger = get_logger("sync_realtime")
 
@@ -46,17 +46,19 @@ def main() -> int:
     args = parser.parse_args()
 
     init_db()
+    scope = load_scope()
 
-    if args.insts:
-        inst_ids = [i.strip() for i in args.insts.split(",") if i.strip()]
-    else:
-        contracts = get_swap_contracts(OKXClient())
-        inst_ids = [c["instId"] for c in contracts]
-        if not inst_ids:
-            logger.error("未获取到任何 USDT 永续合约")
-            return 1
-        logger.info("未指定 --insts，默认订阅全部 %d 个 USDT 永续合约", len(inst_ids))
-    channels = [c.strip() for c in args.channels.split(",")]
+    # 币种区域：命令行 --insts > 配置文件（默认全部 USDT 永续）
+    explicit = ([i.strip() for i in args.insts.split(",") if i.strip()]
+                if args.insts else None)
+    inst_ids = resolve_instruments(scope, OKXClient(), explicit=explicit)
+    if not inst_ids:
+        logger.error("未解析到任何合约（检查下载范围配置）")
+        return 1
+
+    # 订阅频道默认值：命令行 > 配置文件
+    channels_str = args.channels or scope_default(scope, "channels", "trades")
+    channels = [c.strip() for c in channels_str.split(",") if c.strip()]
     manager = RealtimeManager(inst_ids=inst_ids, channels=channels)
 
     shutdown = False

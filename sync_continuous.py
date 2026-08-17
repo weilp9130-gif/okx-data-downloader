@@ -48,6 +48,7 @@ from app.proxy_pool import build_proxy_pool
 from app.downloader.candles import CandleDownloader
 from app.utils.time_utils import ms_to_datetime, bar_to_seconds, utc_ms_timestamp
 from app.utils.okx_utils import ms_to_naive_utc, get_swap_contracts
+from app.download_scope import load_scope, resolve_instruments, resolve_time_range, scope_default
 
 logger = get_logger(__name__)
 
@@ -68,7 +69,7 @@ def parse_args():
         description='OKX 连续同步下载：先全量追赶OKX数据，再低资源实时同步（默认一直运行）')
     p.add_argument('--insts', default=None,
                    help='指定交易对，逗号分隔（默认全部USDT永续）')
-    p.add_argument('--bar', default='1m', help='K线粒度，默认1m')
+    p.add_argument('--bar', default=None, help='K线粒度，默认取配置(1m)')
     p.add_argument('--hours', type=float, default=0,
                    help='运行时长(小时)，默认0=无限运行')
     p.add_argument('--workers', type=int, default=None,
@@ -225,7 +226,7 @@ def _catchup_window(candle_dl, inst, bar, ws, we, overwrite):
         return inst, 0, str(e)
 
 
-def catch_up_pass(candle_dl, contracts, bar, end_dt, workers, overwrite=False):
+def catch_up_pass(candle_dl, contracts, bar, end_dt, workers, overwrite=False, start_dt=None):
     """一轮全量追赶：缺失窗口级并行补齐到 end_dt
 
     一个缺失窗口 = 一个任务 = 一个代理IP。契约数少于IP数时也能打满吞吐；
@@ -247,7 +248,7 @@ def catch_up_pass(candle_dl, contracts, bar, end_dt, workers, overwrite=False):
             lt_ms = c.get('listTime')
             lt = ms_to_naive_utc(int(lt_ms)) if lt_ms else None
             windows = candle_dl.missing_windows(
-                inst, bar, start=None, end=end_dt, list_time=lt)
+                inst, bar, start=start_dt, end=end_dt, list_time=lt)
         except Exception as e:
             fail += 1
             logger.error(f'[阶段1 全量同步] {inst} 窗口检测失败: {e}')
@@ -301,7 +302,7 @@ def catch_up_pass(candle_dl, contracts, bar, end_dt, workers, overwrite=False):
     return total, fail
 
 
-def run_phase1(candle_dl, contracts, bar, args):
+def run_phase1(candle_dl, contracts, bar, args, start_dt=None, end_dt=None):
     """阶段1主循环：追赶直到全部追平或重试轮数用尽"""
     logger.info(BANNER)
     logger.info('[阶段1 全量同步] 开始：将数据库数据与OKX API对齐到当前时刻')
@@ -309,14 +310,14 @@ def run_phase1(candle_dl, contracts, bar, args):
                 f'| 本阶段不限制系统资源，满载追赶')
     logger.info(BANNER)
 
-    end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+    end_dt = end_dt or datetime.now(timezone.utc).replace(tzinfo=None)
     attempts = 0
     total_written = 0
     total_fail = 0
     while not _shutdown and attempts < args.catchup_attempts:
         attempts += 1
         logger.info(f'[阶段1 全量同步] 第 {attempts}/{args.catchup_attempts} 轮追赶开始...')
-        written, fail = catch_up_pass(candle_dl, contracts, bar, end_dt, args.workers)
+        written, fail = catch_up_pass(candle_dl, contracts, bar, end_dt, args.workers, start_dt=start_dt)
         total_written += written
         total_fail += fail
         lag = catchup_lag_minutes(bar, contracts)
@@ -600,19 +601,31 @@ def main():
     client = None
     try:
         init_db()
+        scope = load_scope()
         pool = build_proxy_pool(args)
         client = OKXClient(proxy_pool=pool)
         candle_dl = CandleDownloader(client, cfg)
 
+        # bar / workers 默认值：命令行 > 配置文件 > 内置
+        args.bar = args.bar or scope_default(scope, 'bar', '1m')
+        scope_workers = scope_default(scope, 'workers', 0)
+        if args.workers is None and scope_workers:
+            args.workers = scope_workers
         # 阶段1并发默认值：代理池下每IP 4个并发(上限128)，写库已改每批短连接不受DB池限制
         if args.workers is None:
             args.workers = max(4, min(4 * len(pool), 128)) if pool else 16
 
-        contracts = ([{'instId': i.strip()} for i in args.insts.split(',') if i.strip()]
-                     if args.insts else get_swap_contracts(client))
+        # 币种区域：命令行 --insts > 配置文件（默认全部 USDT 永续）
+        explicit = ([i.strip() for i in args.insts.split(',') if i.strip()]
+                    if args.insts else None)
+        inst_ids = resolve_instruments(scope, client, explicit=explicit)
+        contracts = [{'instId': i} for i in inst_ids]
         if not contracts:
-            logger.error('没有可同步的合约')
+            logger.error('没有可同步的合约（检查下载范围配置）')
             return
+
+        # 时间区域（阶段1 全量同步范围）
+        scope_start, scope_end = resolve_time_range(scope)
 
         # 初始化水位线（逐合约MAX(ts)，避免全表扫描）
         ensure_sync_state(args.bar, [c['instId'] for c in contracts])
@@ -629,7 +642,7 @@ def main():
         if args.skip_catchup:
             logger.info('[阶段1 全量同步] 已通过 --skip-catchup 跳过，直接进入阶段2')
         else:
-            run_phase1(candle_dl, contracts, args.bar, args)
+            run_phase1(candle_dl, contracts, args.bar, args, start_dt=scope_start, end_dt=scope_end)
 
         # ===== 阶段2：实时同步（低资源后台） =====
         if _shutdown:

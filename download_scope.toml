@@ -1,0 +1,39 @@
+﻿# ============================================================
+# 下载范围配置（Download Scope）
+# 控制 sync_continuous / sync_realtime / backfill 的下载区域。
+# 优先级：命令行参数 > 本配置文件 > 代码内置默认
+# 可通过环境变量 DOWNLOAD_SCOPE 指定其他配置文件路径。
+# ============================================================
+
+# ---------- 币种区域 ----------
+[inst_region]
+# mode = "all"     全部满足下方过滤条件的合约（默认）
+# mode = "include" 只下载 include 列表中的合约
+# mode = "exclude" 下载全部，但排除 exclude 列表中的合约
+mode = "all"
+include = [
+    "BTC-USDT-SWAP",
+    "ETH-USDT-SWAP",
+]
+exclude = [
+    # "SOME-TOKEN-USDT-SWAP",
+]
+# 合约过滤条件（mode=all/exclude 时生效）
+inst_type = "SWAP"      # 只取 SWAP 合约
+settle_ccy = "USDT"     # 只取 USDT 结算
+state = "live"          # 只取交易中的合约
+
+# ---------- 时间区域 ----------
+[time_region]
+# 优先级：start/end > limit_days > 全部历史
+# start/end 格式："YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS"（UTC），留空 = 不限
+start = ""             # 例："2024-01-01"
+end = ""               # 例："2026-08-17"
+# 取最近 N 天（未设置 start 时生效），0 = 不限
+limit_days = 0
+
+# ---------- 下载默认值 ----------
+[defaults]
+bar = "1m"             # K线粒度
+workers = 0            # 并发数，0 = 按代理池/内置自动
+channels = "trades"    # sync_realtime 订阅频道（逗号分隔）

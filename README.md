@@ -116,6 +116,40 @@ docker run -d --name okx-timescaledb --restart unless-stopped \
 > 说明：只有 `DB_HOST` 为本机地址（localhost/127.0.0.1）时才允许自动启动 Docker；
 > 远程数据库不可达时会直接报错。容器首次创建需拉取镜像，建议提前 `docker pull`。
 
+## 下载范围配置（download_scope.toml）
+
+根目录 `download_scope.toml` 统一控制三个入口（`sync_continuous` / `sync_realtime` /
+`backfill`）的下载区域。**优先级：命令行参数 > 配置文件 > 代码内置默认**。
+
+```toml
+# ---------- 币种区域 ----------
+[inst_region]
+mode = "all"              # all=全部满足过滤条件的合约 / include=只下 include 列表 / exclude=排除列表
+include = ["BTC-USDT-SWAP"]   # mode=include 时生效
+exclude = []                  # 黑名单
+inst_type = "SWAP"            # 合约类型
+settle_ccy = "USDT"           # 结算币种
+state = "live"                # 交易状态
+
+# ---------- 时间区域 ----------
+[time_region]
+start = ""      # "YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM:SS"（UTC），留空=不限
+end = ""        # 留空=现在
+limit_days = 0  # 未设 start 时取最近 N 天；0=不限
+
+# ---------- 下载默认值 ----------
+[defaults]
+bar = "1m"          # K线粒度
+workers = 0         # 并发数，0=自动
+channels = "trades" # sync_realtime 订阅频道
+```
+
+- 币种区域默认 **`mode = "all"`**（全部 USDT 永续合约）
+- 可用环境变量 `DOWNLOAD_SCOPE` 指定其他配置文件路径
+- 示例：只下载 BTC/ETH，且只取最近 30 天 → 改 `[inst_region]` 为
+  `mode = "include"` + `include = ["BTC-USDT-SWAP","ETH-USDT-SWAP"]`，
+  改 `[time_region]` 为 `limit_days = 30`
+
 ## 使用说明
 
 ### 1. 初始化数据库表结构

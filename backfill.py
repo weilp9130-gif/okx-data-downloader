@@ -24,6 +24,7 @@ from app.downloader.instruments import InstrumentDownloader
 from app.downloader.mark_price import MarkPriceDownloader
 from app.downloader.open_interest import OpenInterestDownloader
 from app.downloader.trades import TradesDownloader
+from app.download_scope import load_scope, scope_default
 from app.okx_client import OKXClient
 from app.utils.logger import get_logger
 from app.utils.time_utils import bar_to_seconds, parse_date
@@ -132,17 +133,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_time_range(args) -> tuple:
+def _resolve_time_range(args, scope=None) -> tuple:
     """解析 --start / --end / --limit-days，返回 (start, end)
 
-    优先级：--start/--end > --limit-days > 默认最近一年。
-    CLI 统一解析，各 Downloader 不再各自解释 --limit-days。
+    优先级：命令行 > 配置文件(time_region) > 默认最近一年。
     """
-    end = parse_date(args.end) if args.end else datetime.now(timezone.utc)
-    if args.start:
-        start = parse_date(args.start)
-    elif args.limit_days:
-        start = end - timedelta(days=args.limit_days)
+    region = (scope or {}).get("time_region", {})
+    cfg_start = args.start or (region.get("start") or None)
+    cfg_end = args.end or (region.get("end") or None)
+    cfg_limit = args.limit_days if args.limit_days is not None else (region.get("limit_days") or 0)
+
+    end = parse_date(cfg_end) if cfg_end else datetime.now(timezone.utc)
+    if cfg_start:
+        start = parse_date(cfg_start)
+    elif cfg_limit and cfg_limit > 0:
+        start = end - timedelta(days=cfg_limit)
     else:
         start = end.replace(year=end.year - 1)
     return start, end
@@ -314,14 +319,23 @@ def main() -> int:
                      args.data_type, ", ".join(sorted(VALID_TYPES)))
         return 1
 
+    scope = load_scope()
+    args.bar = args.bar or scope_default(scope, "bar", "1D")
     types = _resolve_types(args)
-    start, end = _resolve_time_range(args)
+    start, end = _resolve_time_range(args, scope)
 
-    # 校验 --inst
+    # 校验 --inst；缺省时若配置为单合约 include 则自动采用
     needs_inst = [t for t in types if t not in NO_INST_TYPES]
     if needs_inst and not args.inst:
-        logger.error("类型 %s 需要 --inst 参数", ", ".join(needs_inst))
-        return 1
+        region = scope.get("inst_region", {})
+        include = [i for i in region.get("include", []) if i]
+        if region.get("mode") == "include" and len(include) == 1:
+            args.inst = include[0]
+            logger.info("从下载范围配置解析 --inst=%s", args.inst)
+        else:
+            logger.error("类型 %s 需要 --inst 参数（或在下载范围配置中设为单一 include 合约）",
+                         ", ".join(needs_inst))
+            return 1
 
     if args.dry_run:
         _print_dry_run(types, args, start, end)
