@@ -453,6 +453,73 @@ class CandleDownloader:
         # 通过写库缓冲限流写入，避免高并发压垮 PostgreSQL
         return get_write_buffer().put(rows, overwrite=overwrite)
 
+    def missing_windows(
+        self,
+        inst_id: str,
+        bar: str,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        list_time: Optional[datetime] = None,
+    ) -> List[Tuple[int, int]]:
+        """计算缺失窗口（毫秒对列表），不做下载
+
+        与 download_range 的窗口检测逻辑一致，供"时间窗并行"使用。
+        """
+        if start is None:
+            start = datetime(2019, 1, 1)
+        if end is None:
+            end = datetime.now(timezone.utc).replace(tzinfo=None)
+        start = start.replace(tzinfo=None) if start.tzinfo is not None else start
+        end = end.replace(tzinfo=None) if end.tzinfo is not None else end
+
+        start_ms = utc_ms_timestamp(start)
+        end_ms = utc_ms_timestamp(end)
+        list_time_ms = utc_ms_timestamp(list_time) if list_time is not None else None
+
+        if end_ms <= start_ms:
+            return []
+        if bar in self._FULL_WINDOW_BARS:
+            return [(start_ms, end_ms)]
+        return self._find_missing_windows(
+            inst_id, bar, start_ms, end_ms, list_time_ms
+        )
+
+    def split_days(self, windows: List[Tuple[int, int]], bar: str) -> List[Tuple[int, int]]:
+        """把窗口切成按天对齐的子窗口，提升并行度
+
+        仅对小于 1 天的 bar（1m/5m/...）切分；日线及以上粒度数据量小，
+        保持整窗任务，避免周线/月线被天级切片重复拉取。
+        """
+        try:
+            if bar_to_seconds(bar) >= self.DAY_MS / 1000:
+                return list(windows)
+        except ValueError:
+            pass
+        chunks: List[Tuple[int, int]] = []
+        chunk_ms = 7 * self.DAY_MS  # 7天一片：足够打满线程池，又控制任务总量
+        for ws, we in windows:
+            cur = ws
+            while cur < we:
+                cend = min(cur + chunk_ms, we)
+                chunks.append((cur, cend))
+                cur = cend
+        return chunks
+
+    def fetch_window(
+        self, inst_id: str, bar: str, ws_ms: int, we_ms: int,
+        overwrite: bool = False,
+    ) -> int:
+        """下载单个缺失窗口，返回写入行数（线程安全，可多线程并行调用）"""
+        written, _ = self._fetch_backtrack(inst_id, bar, ws_ms, we_ms, overwrite)
+        return written
+
+    def mark_verified(
+        self, inst_id: str, bar: str,
+        windows: List[Tuple[int, int]], end_ms: int,
+    ) -> None:
+        """推进验证水位线到第一个缺失窗口起点"""
+        self._advance_verified(inst_id, bar, windows, end_ms)
+
     def update_latest(self, inst_id: str, bar: str, lookback_days: int = 1) -> int:
         """增量更新最近N天的K线数据
 

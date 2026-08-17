@@ -46,7 +46,7 @@ from app.okx_client import OKXClient
 from app.models import Candle
 from app.proxy_pool import build_proxy_pool
 from app.downloader.candles import CandleDownloader
-from app.utils.time_utils import ms_to_datetime, bar_to_seconds
+from app.utils.time_utils import ms_to_datetime, bar_to_seconds, utc_ms_timestamp
 from app.utils.okx_utils import ms_to_naive_utc, get_swap_contracts
 
 logger = get_logger(__name__)
@@ -216,52 +216,87 @@ def catchup_lag_minutes(bar, contracts):
 # ----------------------------------------------------------------------
 # 阶段1：全量同步（追赶，不限制系统资源）
 # ----------------------------------------------------------------------
-def _catchup_contract(candle_dl, inst, bar, end_dt, list_time_ms):
+def _catchup_window(candle_dl, inst, bar, ws, we, overwrite):
+    """下载单个缺失窗口，返回 (inst, 写入行数, err)"""
     try:
-        # listTime 来自 OKX 接口为字符串，需转 int（ms_to_datetime 内部有 / 1000）
-        start = ms_to_naive_utc(int(list_time_ms)) if list_time_ms else None
-        n = candle_dl.download_range(
-            inst, bar, start=start, end=end_dt, list_time=start)
+        n = candle_dl.fetch_window(inst, bar, ws, we, overwrite)
         return inst, n, None
     except Exception as e:
         return inst, 0, str(e)
 
 
-def catch_up_pass(candle_dl, contracts, bar, end_dt, workers):
-    """一轮全量追赶：所有合约并行补齐到 end_dt，返回成功合约列表"""
+def catch_up_pass(candle_dl, contracts, bar, end_dt, workers, overwrite=False):
+    """一轮全量追赶：缺失窗口级并行补齐到 end_dt
+
+    一个缺失窗口 = 一个任务 = 一个代理IP。契约数少于IP数时也能打满吞吐；
+    窗口检测串行（每合约一次DB查询），实际拉取全部并行。
+    """
     done = ok = fail = 0
     total = 0
     t0 = time.time()
     last_log = time.time()
     success_insts = []
+    inst_windows = {}   # inst -> 缺失窗口列表（用于推进验证水位线）
+    inst_written = {}
 
-    def work(c):
-        inst, n, err = _catchup_contract(
-            candle_dl, c['instId'], bar, end_dt, c.get('listTime'))
-        return inst, n, err
+    # 1) 窗口检测（串行，快速）
+    tasks = []
+    for c in contracts:
+        inst = c['instId']
+        try:
+            lt_ms = c.get('listTime')
+            lt = ms_to_naive_utc(int(lt_ms)) if lt_ms else None
+            windows = candle_dl.missing_windows(
+                inst, bar, start=None, end=end_dt, list_time=lt)
+        except Exception as e:
+            fail += 1
+            logger.error(f'[阶段1 全量同步] {inst} 窗口检测失败: {e}')
+            continue
+        if not windows:
+            success_insts.append(inst)
+            inst_written[inst] = 0
+            continue
+        inst_windows[inst] = windows
+        chunks = candle_dl.split_days(windows, bar)
+        for ws, we in chunks:
+            tasks.append((inst, ws, we))
+
+    # 2) 时间窗并行下载（单一线程池，每窗口任务绑定一个代理IP）
+    def work(t):
+        return _catchup_window(candle_dl, t[0], bar, t[1], t[2], overwrite)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(work, c): c['instId'] for c in contracts}
+        futs = [ex.submit(work, t) for t in tasks]
         for fut in as_completed(futs):
             inst, n, err = fut.result()
             done += 1
             if err:
                 fail += 1
-                logger.error(f'[阶段1 全量同步] {inst}: {err}')
+                logger.error(f'[阶段1 全量同步] {inst} 窗口失败: {err}')
             else:
                 ok += 1
                 total += n
-                success_insts.append(inst)
+                inst_written[inst] = inst_written.get(inst, 0) + n
+                if inst not in success_insts:
+                    success_insts.append(inst)
             now = time.time()
-            if (done % 20 == 0 or done == len(contracts)
-                    or now - last_log >= 30):
+            if done % 100 == 0 or (now - last_log) >= 30:
                 rate = total / max(now - t0, 0.1)
                 logger.info(
-                    f'[阶段1 全量同步] 进度 {done}/{len(contracts)} 合约 '
+                    f'[阶段1 全量同步] 进度 {done}/{len(tasks)} 窗口 '
                     f'(成功{ok} 失败{fail}) | 累计写入 {total:,} 根 | '
                     f'速率 {rate:,.0f} 根/秒 | 已用 {(now - t0) / 60:.1f} 分')
                 last_log = now
-    # 本轮所有成功合约统一批量刷新水位线，避免逐合约短连接
+
+    # 3) 推进验证水位线 + 刷新 sync_state 水位线
+    end_ms = utc_ms_timestamp(end_dt)
+    for inst in success_insts:
+        windows = inst_windows.get(inst)
+        if windows:
+            try:
+                candle_dl.mark_verified(inst, bar, windows, end_ms)
+            except Exception:
+                pass
     batch_refresh_watermark(success_insts, bar)
     return total, fail
 
