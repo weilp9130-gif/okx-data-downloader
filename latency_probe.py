@@ -17,8 +17,9 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List, Optional
 
 from app.database import get_engine, init_db
 from app.latency.clock import ClockOffsetTracker
@@ -41,12 +42,19 @@ from app.latency.metrics import (
     STAT_SEQ_RESET,
     STAT_STRATEGY_DROPPED,
     STAT_WS_CONNECT,
+    STAT_WS_CONNECT_ATTEMPTS,
+    STAT_WS_CONNECT_FAILURES,
+    STAT_WS_CONTROL,
+    STAT_WS_ENDPOINT_FALLBACKS,
     STAT_WS_MESSAGES,
+    STAT_WS_PARSE_ERRORS,
     STAT_WS_RECONNECT,
+    STAT_WS_UNKNOWN,
     STAT_WRITE_ERRORS,
     STAT_WRITTEN,
     StatsRegistry,
     WindowSummarizer,
+    lag_percentiles,
 )
 from app.latency.mock_strategy import MockStrategy, WORKLOAD
 from app.latency.persistence import LatencySampleWriter, upsert_stats, upsert_summaries
@@ -120,6 +128,37 @@ def _make_emit(writer: LatencySampleWriter, summarizer: WindowSummarizer):
     return emit
 
 
+class EventLoopLagMonitor:
+    """event-loop lag 诊断（C-P1-2，log-only）：周期任务记录
+    `lag_ms = 实际唤醒 - 期望唤醒`；不落库、不改任何 latency 计算。
+
+    若日后 WS P99 高而 lag 也高 -> 本机 event-loop 主导；lag 正常而 WS P99
+    高 -> 网络问题。
+    """
+
+    MAX_LAGS = 600
+
+    def __init__(self, interval: float = 0.05, max_lags: int = MAX_LAGS) -> None:
+        self.interval = float(interval)
+        self._lags: deque = deque(maxlen=max_lags)
+
+    async def run(self, stop_event: threading.Event) -> None:
+        expected = time.monotonic()
+        while not stop_event.is_set():
+            await asyncio.sleep(self.interval)
+            if stop_event.is_set():
+                break
+            actual = time.monotonic()
+            self._lags.append((actual - expected) * 1000.0)
+            expected = actual
+
+    def summary(self) -> Dict[str, float]:
+        return lag_percentiles(list(self._lags))
+
+    def reset(self) -> None:
+        self._lags.clear()
+
+
 def _print_window(summary_rows: List[dict], stats_rows: List[dict]) -> None:
     if summary_rows:
         logger.info("=== 窗口百分位汇总（sample_ts 归属，延后关闭）===")
@@ -151,7 +190,9 @@ def _print_window(summary_rows: List[dict], stats_rows: List[dict]) -> None:
             "STATS msgs=%s mkt=%s parsed=%s queued=%s dropped=%s written=%s "
             "write_err=%s final_fail=%s parse_err=%s drop_rate=%.4f "
             "seq_gap=%s seq_reset=%s ping_missed=%s neg_raw=%s neg_corr=%s "
-            "http_err=%s notice=%s strat_drop=%s conn=%s recon=%s",
+            "http_err=%s notice=%s strat_drop=%s conn=%s recon=%s "
+            "ws_ctrl=%s ws_unknown=%s ws_parse_err=%s conn_attempts=%s "
+            "conn_fails=%s fallbacks=%s",
             s.get(STAT_WS_MESSAGES, 0), s.get(STAT_MARKET_SAMPLES, 0),
             parsed, s.get(STAT_QUEUED, 0), s.get(STAT_DROPPED, 0),
             s.get(STAT_WRITTEN, 0), s.get(STAT_WRITE_ERRORS, 0),
@@ -161,6 +202,9 @@ def _print_window(summary_rows: List[dict], stats_rows: List[dict]) -> None:
             s.get(STAT_NEG_CORRECTED, 0), s.get(STAT_HTTP_ERRORS, 0),
             s.get(STAT_NOTICE, 0), s.get(STAT_STRATEGY_DROPPED, 0),
             s.get(STAT_WS_CONNECT, 0), s.get(STAT_WS_RECONNECT, 0),
+            s.get(STAT_WS_CONTROL, 0), s.get(STAT_WS_UNKNOWN, 0),
+            s.get(STAT_WS_PARSE_ERRORS, 0), s.get(STAT_WS_CONNECT_ATTEMPTS, 0),
+            s.get(STAT_WS_CONNECT_FAILURES, 0), s.get(STAT_WS_ENDPOINT_FALLBACKS, 0),
         )
         # 阈值告警（P1-6）
         if drop_rate > 0.01:
@@ -183,9 +227,11 @@ def _on_close(engine, summary_rows: List[dict], stats_rows: List[dict]) -> None:
 
 async def _ticker(summarizer: WindowSummarizer, stats: StatsRegistry,
                   writer: LatencySampleWriter, strategy: MockStrategy,
-                  summary_interval: int, stop_ev: threading.Event) -> None:
-    """每秒 tick（关闭窗口）；每 summary_interval 输出队列/CPU 遥测（P1-23）。"""
-    last_telemetry = 0.0
+                  summary_interval: int, stop_ev: threading.Event,
+                  lag_monitor: Optional[EventLoopLagMonitor] = None) -> None:
+    """每秒 tick（关闭窗口）；每 summary_interval 输出队列/CPU/event-loop lag
+    遥测（P1-23 / C-P1-2）。"""
+    last_telemetry = time.monotonic()   # 避免首个 tick 立即触发遥测
     cpu_base = time.process_time()
     wall_base = time.monotonic()
     while not stop_ev.is_set():
@@ -202,6 +248,12 @@ async def _ticker(summarizer: WindowSummarizer, stats: StatsRegistry,
             cpu_pct = ((cpu_now - cpu_base) / (wall_now - wall_base) * 100.0
                        if wall_now > wall_base else 0.0)
             cpu_base, wall_base = cpu_now, wall_now
+            if lag_monitor is not None:
+                lag = lag_monitor.summary()
+                logger.info(
+                    "EVENT_LOOP_LAG p50=%.2f p95=%.2f p99=%.2f max=%.2f (ms)",
+                    lag["p50"], lag["p95"], lag["p99"], lag["max"],
+                )
             logger.info(
                 "QUEUE_TELEMETRY writer_depth=%d writer_capacity=%d "
                 "strategy_depth=%d strategy_capacity=%d cpu_time=%.3f "
@@ -251,8 +303,11 @@ async def _run(args, insts: List[str], channels: List[str], ping_timeout: float)
     probe_task = asyncio.create_task(probe.run())
     http_task = asyncio.create_task(
         clock.runtime_loop(args.http_rtt_interval, stop_ev))
+    lag_monitor = EventLoopLagMonitor()
+    lag_task = asyncio.create_task(lag_monitor.run(stop_ev))
     ticker_task = asyncio.create_task(
-        _ticker(summarizer, stats, writer, strategy, args.summary_interval, stop_ev))
+        _ticker(summarizer, stats, writer, strategy, args.summary_interval,
+                stop_ev, lag_monitor=lag_monitor))
 
     start = time.monotonic()
     try:
@@ -280,6 +335,16 @@ async def _run(args, insts: List[str], channels: List[str], ping_timeout: float)
             await ticker_task
         except asyncio.CancelledError:
             pass
+        lag_task.cancel()
+        try:
+            await lag_task
+        except asyncio.CancelledError:
+            pass
+        lag = lag_monitor.summary()
+        logger.info(
+            "EVENT_LOOP_LAG (final) p50=%.2f p95=%.2f p99=%.2f max=%.2f (ms)",
+            lag["p50"], lag["p95"], lag["p99"], lag["max"],
+        )
         summarizer.flush_all()
         writer.stop(timeout=15.0)
         logger.info("===== 停止统计（全部窗口合计）=====")
@@ -290,7 +355,9 @@ async def _run(args, insts: List[str], channels: List[str], ping_timeout: float)
             "TOTAL msgs=%s mkt=%s parsed=%s queued=%s dropped=%s written=%s "
             "write_err=%s final_fail=%s parse_err=%s drop_rate=%.4f "
             "seq_gap=%s seq_reset=%s ping_missed=%s neg_raw=%s neg_corr=%s "
-            "http_err=%s notice=%s strat_drop=%s conn=%s recon=%s",
+            "http_err=%s notice=%s strat_drop=%s conn=%s recon=%s "
+            "ws_ctrl=%s ws_unknown=%s ws_parse_err=%s conn_attempts=%s "
+            "conn_fails=%s fallbacks=%s",
             totals.get(STAT_WS_MESSAGES, 0), totals.get(STAT_MARKET_SAMPLES, 0),
             parsed, totals.get(STAT_QUEUED, 0), totals.get(STAT_DROPPED, 0),
             totals.get(STAT_WRITTEN, 0), totals.get(STAT_WRITE_ERRORS, 0),
@@ -300,6 +367,11 @@ async def _run(args, insts: List[str], channels: List[str], ping_timeout: float)
             totals.get(STAT_NEG_CORRECTED, 0), totals.get(STAT_HTTP_ERRORS, 0),
             totals.get(STAT_NOTICE, 0), totals.get(STAT_STRATEGY_DROPPED, 0),
             totals.get(STAT_WS_CONNECT, 0), totals.get(STAT_WS_RECONNECT, 0),
+            totals.get(STAT_WS_CONTROL, 0), totals.get(STAT_WS_UNKNOWN, 0),
+            totals.get(STAT_WS_PARSE_ERRORS, 0),
+            totals.get(STAT_WS_CONNECT_ATTEMPTS, 0),
+            totals.get(STAT_WS_CONNECT_FAILURES, 0),
+            totals.get(STAT_WS_ENDPOINT_FALLBACKS, 0),
         )
         logger.info("latency_probe 已停止")
 

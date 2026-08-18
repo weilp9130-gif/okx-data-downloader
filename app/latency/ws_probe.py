@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import platform
+import random
 import sys
 import time
 import uuid
@@ -46,8 +47,14 @@ from .metrics import (
     STAT_SEQ_GAP,
     STAT_SEQ_RESET,
     STAT_WS_CONNECT,
+    STAT_WS_CONNECT_ATTEMPTS,
+    STAT_WS_CONNECT_FAILURES,
+    STAT_WS_CONTROL,
+    STAT_WS_ENDPOINT_FALLBACKS,
     STAT_WS_MESSAGES,
+    STAT_WS_PARSE_ERRORS,
     STAT_WS_RECONNECT,
+    STAT_WS_UNKNOWN,
     SYSTEM_INST_ID,
     WS_CHANNEL,
     WS_PING_METRIC,
@@ -70,7 +77,11 @@ else:
 OPEN_TIMEOUT = 8.0
 RECV_TIMEOUT = 1.0            # recv 无消息超时（不算 ws_messages_received）
 SUBSCRIBE_TIMEOUT = 5.0       # 订阅 ack 等待超时
-RECONNECT_DELAY = 1.0         # 重连间隔
+
+# C-P1-5：重连有限指数退避 [1,2,4,8,16,30,30,...] + 均匀 jitter [0, 0.5*delay]
+RECONNECT_BACKOFF = [1.0, 2.0, 4.0, 8.0, 16.0, 30.0]
+RECONNECT_JITTER_FRACTION = 0.5
+RECONNECT_STABLE_RESET_S = 60.0   # 连接稳定运行 >=60s 后连续失败计数归零
 
 # seq 检测频道（P0-12）：只有增量盘口频道参与序列异常计数
 SEQ_CHANNELS = {"books", "books-l2-tbt", "books50-l2-tbt"}
@@ -247,6 +258,10 @@ class WSProbe:
         self._pending_subs: Set[Tuple[str, str]] = set()
         self._active_subs: Set[Tuple[str, str]] = set()
         self._subscribe_done: asyncio.Event = asyncio.Event()
+        # C-P1-5：重连退避状态（测试可注入 jitter/延迟）
+        self._consecutive_failures = 0
+        self._conn_up_mono: Optional[float] = None
+        self._jitter_fn = random.uniform
 
     # ------------------------------------------------------------------
     def _now_window(self) -> datetime:
@@ -269,10 +284,11 @@ class WSProbe:
             if reason == RECONNECT_SUBSCRIBE_FAILURE:
                 logger.error("All channel subscriptions failed; exiting")
                 break
+            self._maybe_reset_backoff()
             self._reset_for_reconnect()
             self.stats.increment(self._now_window(), STAT_WS_RECONNECT)
             gap_start = time.monotonic()
-            await asyncio.sleep(RECONNECT_DELAY)
+            await asyncio.sleep(self._next_reconnect_delay())
             gap_ms = (time.monotonic() - gap_start) * 1000.0
             logger.info("Reconnecting reason=%s connection_gap_ms=%.1f (log only)",
                         reason, gap_ms)
@@ -281,6 +297,22 @@ class WSProbe:
     def _reset_for_reconnect(self) -> None:
         """重连：session += 1、清空 seq 状态、新 connId；**不重置 clock_offset**。"""
         self.seq_states.clear()
+
+    def _next_reconnect_delay(self) -> float:
+        """有限指数退避 + 均匀 jitter（C-P1-5）：[1,2,4,8,16,30,30,...]"""
+        idx = min(self._consecutive_failures, len(RECONNECT_BACKOFF) - 1)
+        base = RECONNECT_BACKOFF[idx]
+        self._consecutive_failures += 1
+        return base + self._jitter_fn(0.0, RECONNECT_JITTER_FRACTION * base)
+
+    def _maybe_reset_backoff(self) -> None:
+        """连接稳定运行 >=60s 后连续失败计数归零（C-P1-5）。"""
+        if (self._conn_up_mono is not None
+                and time.monotonic() - self._conn_up_mono >= RECONNECT_STABLE_RESET_S):
+            self._consecutive_failures = 0
+            logger.debug("Connection stable for >=%.0fs; reconnect backoff reset",
+                         RECONNECT_STABLE_RESET_S)
+        self._conn_up_mono = None
 
     # ------------------------------------------------------------------
     async def _connect_once(self) -> str:
@@ -297,13 +329,43 @@ class WSProbe:
             urls = [self._working_url] + [u for u in WS_URLS if u != self._working_url]
         else:
             urls = WS_URLS
-        for url in urls:
-            reason = await self._run_connection(url)
-            if reason == "_connect_failed_":
-                logger.warning("WS endpoint unreachable, trying next: %s", url)
-                continue
-            self._working_url = url
-            return reason
+        for idx, url in enumerate(urls):
+            if self._stop.is_set():
+                break
+            # 连接任务与 stop 事件竞争：shutdown 时立即取消在途连接，
+            # 避免外层 wait_for 取消导致 attempts 欠计/停机卡住
+            conn_task = asyncio.create_task(self._run_connection(url))
+            stop_task = asyncio.create_task(self._stop.wait())
+            done, pending = await asyncio.wait(
+                {conn_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except BaseException:
+                    pass
+            self.stats.increment(self._now_window(), STAT_WS_CONNECT_ATTEMPTS)
+            if conn_task in done:
+                try:
+                    reason = conn_task.result()
+                except BaseException:
+                    reason = "_connect_failed_"
+                if reason == "_connect_failed_":
+                    self.stats.increment(self._now_window(), STAT_WS_CONNECT_FAILURES)
+                    if idx < len(urls) - 1:
+                        self.stats.increment(self._now_window(),
+                                             STAT_WS_ENDPOINT_FALLBACKS)
+                        logger.warning(
+                            "WS endpoint fallback from=%s to=%s reason=connect_failed",
+                            url, urls[idx + 1],
+                        )
+                    continue
+                self._working_url = url
+                return reason
+            # stop 在连接/订阅期间触发：该连接被取消，不视为端点失败
+            return RECONNECT_MANUAL_STOP
         return RECONNECT_SOCKET_CLOSED
 
     async def _run_connection(self, url: str) -> str:
@@ -323,6 +385,7 @@ class WSProbe:
         try:
             async with ws:
                 self._ws = ws
+                self._working_url = url       # C-P1-3：SESSION_START 记录 active_endpoint
                 await self._send_subscribe(ws)
                 recv_task = asyncio.create_task(self._recv_loop())
                 ping_task = asyncio.create_task(self._ping_loop())
@@ -336,7 +399,15 @@ class WSProbe:
                     ping_task.cancel()
                     self._ws = None
                     return RECONNECT_SUBSCRIBE_FAILURE
+                if self._stop.is_set():
+                    # 关闭信号在订阅等待期间到达 -> 立即退出该连接，避免 shutdown
+                    # 卡在 subscribe 等待、被外层 wait_for 取消导致 attempts 欠计
+                    recv_task.cancel()
+                    ping_task.cancel()
+                    self._ws = None
+                    return RECONNECT_MANUAL_STOP
                 self._log_session_start()
+                self._conn_up_mono = time.monotonic()   # C-P1-5：稳定运行计时起点
                 done, pending = await asyncio.wait(
                     {recv_task, ping_task}, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -362,10 +433,17 @@ class WSProbe:
 
     def _log_session_start(self) -> None:
         offset = self.clock.active_offset()
+        selected_rtt = None
+        active_probe = getattr(self.clock, "active_probe", None)
+        if active_probe is not None:
+            p = active_probe()
+            if p is not None:
+                selected_rtt = p[0]     # C-P1-1：所选 min-RTT 探测的 rtt
         logger.info(
             "SESSION_START session=%d conn_id=%s start_ts=%s pid=%d python=%s "
             "platform=%s cpu_count=%s insts=%s channels=%s strategy=%s workload=%s "
-            "ping_interval=%.2f ping_timeout=%.2f clock_offset_ms=%s",
+            "ping_interval=%.2f ping_timeout=%.2f clock_offset_ms=%s "
+            "selected_probe_rtt=%s active_endpoint=%s",
             self.session, self.conn_id, datetime.now(timezone.utc).isoformat(),
             os.getpid(), sys.version.split()[0], platform.platform(),
             os.cpu_count() or "?", ",".join(self.insts), ",".join(self.channels),
@@ -373,6 +451,8 @@ class WSProbe:
             getattr(self.strategy, "workload", None) if self.strategy else None,
             self.ping_interval, self.ping_timeout,
             "%.2f" % offset if offset is not None else "NULL",
+            "%.2f" % selected_rtt if selected_rtt is not None else "NULL",
+            self._working_url or "",
         )
 
     # ------------------------------------------------------------------
@@ -419,6 +499,7 @@ class WSProbe:
         """
         if isinstance(msg, str):
             if msg == "ping":                       # 服务器文本 ping -> 回 pong
+                self.stats.increment(self._now_window(), STAT_WS_CONTROL)
                 try:
                     await self._ws.send("pong")
                 except Exception:
@@ -426,17 +507,20 @@ class WSProbe:
                     return False
                 return True
             if msg == "pong":                       # 应用层 pong -> PingProbe
+                self.stats.increment(self._now_window(), STAT_WS_CONTROL)
                 self._handle_pong(recv_ns, arrival_mono_ns)
                 return True
             try:
                 data = json.loads(msg)
             except (json.JSONDecodeError, TypeError):
+                self.stats.increment(self._now_window(), STAT_WS_PARSE_ERRORS)
                 logger.debug("Unknown text WS message: %.200s", msg)
                 return True
         elif isinstance(msg, (bytes, bytearray)):
             try:
                 data = json.loads(msg)
             except (json.JSONDecodeError, TypeError):
+                self.stats.increment(self._now_window(), STAT_WS_PARSE_ERRORS)
                 logger.warning("Failed to decode binary WS message (protocol error)")
                 return True
         else:
@@ -447,14 +531,18 @@ class WSProbe:
         event = data.get("event")
         op = data.get("op")
         if event == "subscribe":
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             self._handle_subscribe_ack(data)
             return True
         if event == "unsubscribe":
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             return True
         if event == "error":
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             self._handle_subscribe_error(data)
             return True
         if event == "notice":
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             logger.warning(
                 "OKX notice: code=%s msg=%s connId=%s (graceful reconnect)",
                 data.get("code"), data.get("msg"), data.get("connId"),
@@ -463,9 +551,11 @@ class WSProbe:
             self._exit_reason = RECONNECT_OKX_NOTICE
             return False
         if op == "pong":                            # JSON 形式 pong
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             self._handle_pong(recv_ns, arrival_mono_ns)
             return True
         if op == "ping":                            # 罕见 JSON ping
+            self.stats.increment(self._now_window(), STAT_WS_CONTROL)
             try:
                 await self._ws.send("pong")
             except Exception:
@@ -475,6 +565,7 @@ class WSProbe:
         if "arg" in data and isinstance(data.get("data"), list):
             self._handle_market_message(data, recv_ns, arrival_mono_ns)
             return True
+        self.stats.increment(self._now_window(), STAT_WS_UNKNOWN)
         logger.debug("Unhandled WS message keys=%s", list(data.keys()))
         return True
 

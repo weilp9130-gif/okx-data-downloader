@@ -30,7 +30,10 @@ from .metrics import (
     MAX_SOURCE_LEN,
     SAMPLE_CLASS_MARKET,
     SOURCE_OKX,
+    STAT_DROPPED,
     STAT_FINAL_FAILED,
+    STAT_QUEUED,
+    STAT_SAMPLES_PARSED,
     STAT_WRITE_ERRORS,
     STAT_WRITTEN,
     window_start_for,
@@ -110,6 +113,8 @@ class LatencySampleWriter(BaseWriter):
         self._committed_written: Dict[datetime, int] = {}   # 累计 committed written（按窗口）
         self._final_failed_rows: List[dict] = []
         self._final_failed_reported = False
+        # C-P0-5：保护 _pending / _final_failed_rows / _committed_written（RLock 可重入）
+        self._state_lock = threading.RLock()
         super().__init__()
 
     # ------------------------------------------------------------------
@@ -123,25 +128,63 @@ class LatencySampleWriter(BaseWriter):
     def stop(self, timeout: float = 5.0) -> None:
         self._stopped.set()
         self._thread.join(timeout=timeout)
-        if self._thread.is_alive():
+        thread_alive = self._thread.is_alive()
+        if thread_alive:
             logger.error(
-                "Writer thread did not stop within %.1fs; draining best-effort "
-                "(some queued rows may be lost)", timeout,
+                "Writer thread did not stop within %.1fs; reconciling remaining "
+                "rows best-effort (no silent loss allowed)", timeout,
             )
-        # P1-21：无论 join 结果如何，都尽力 drain 剩余 queued 行并对账
+        # C-P0-5：join 后（无论是否存活）收集 buffer + _pending 剩余行，尝试 flush
         remaining: List[dict] = []
+        with self._state_lock:
+            pending = list(self._pending)
+            self._pending = []
         while True:
             try:
                 remaining.append(self._buffer.get_nowait())
             except queue.Empty:
                 break
+        remaining = pending + remaining
         if remaining:
             try:
                 self._flush(remaining)
             except Exception as e:
                 logger.error("Final buffer drain flush failed: %s", e)
-                self._final_failed_rows.extend(remaining)
+                with self._state_lock:
+                    self._final_failed_rows.extend(remaining)
+        if thread_alive:
+            logger.error(
+                "Writer thread still alive after stop: rows in its in-flight batch "
+                "may be unreconciled; accounting below is best-effort"
+            )
         self._report_final_failed()
+        self._log_accounting()
+
+    def _log_accounting(self) -> None:
+        """停止时打印对账（C-P0-5）：samples_parsed == queued + dropped 且
+        queued == written + final_failed（以实际统计语义为准；任何无法解释的
+        sample 丢失都视为 bug）。"""
+        parsed = self.stats.total(STAT_SAMPLES_PARSED)
+        queued = self.stats.total(STAT_QUEUED)
+        dropped = self.stats.total(STAT_DROPPED)
+        written = self.stats.total(STAT_WRITTEN)
+        final_failed = self.stats.total(STAT_FINAL_FAILED)
+        if parsed != queued + dropped:
+            logger.error(
+                "ACCOUNTING MISMATCH samples_parsed=%d != queued=%d + dropped=%d",
+                parsed, queued, dropped,
+            )
+        else:
+            logger.info("ACCOUNTING samples_parsed=%d == queued=%d + dropped=%d",
+                        parsed, queued, dropped)
+        if queued != written + final_failed:
+            logger.error(
+                "ACCOUNTING MISMATCH queued=%d != written=%d + final_failed=%d",
+                queued, written, final_failed,
+            )
+        else:
+            logger.info("ACCOUNTING queued=%d == written=%d + final_failed=%d",
+                        queued, written, final_failed)
 
     def _run(self) -> None:
         """后台写入线程（override）：停止时 final flush，失败行计入
@@ -150,9 +193,10 @@ class LatencySampleWriter(BaseWriter):
         backoff = self.RETRY_BACKOFF
         final_failed: List[dict] = []
         while not self._stopped.is_set():
-            if self._pending:
-                pending_batch = self._pending
+            with self._state_lock:
+                pending_batch = list(self._pending)
                 self._pending = []
+            if pending_batch:
                 try:
                     self._flush(pending_batch)
                     backoff = self.RETRY_BACKOFF
@@ -160,8 +204,9 @@ class LatencySampleWriter(BaseWriter):
                     logger.error(
                         "Writer flush retry failed, next retry in %.1fs: %s", backoff, e
                     )
-                    self._pending = pending_batch + self._pending
-                    time.sleep(backoff)
+                    with self._state_lock:
+                        self._pending = pending_batch + self._pending
+                    self._stopped.wait(backoff)      # 停止时立即唤醒，不硬等
                     backoff = min(backoff * 2, self.MAX_RETRY_BACKOFF)
                 continue
             try:
@@ -179,18 +224,21 @@ class LatencySampleWriter(BaseWriter):
                     backoff = self.RETRY_BACKOFF
                 except Exception as e:
                     logger.error("Writer flush failed, queued for retry: %s", e)
-                    self._pending = batch
+                    with self._state_lock:
+                        self._pending = batch
                     backoff = self.RETRY_BACKOFF
                 batch = []
-        remaining = self._pending + batch
-        self._pending = []
+        with self._state_lock:
+            remaining = list(self._pending) + batch
+            self._pending = []
         if remaining:
             try:
                 self._flush(remaining)
             except Exception as e:
                 logger.error("Final flush failed on stop: %s", e)
                 final_failed = remaining
-        self._final_failed_rows = final_failed
+        with self._state_lock:
+            self._final_failed_rows = final_failed
 
     # ------------------------------------------------------------------
     def _flush(self, batch: List[dict]) -> None:
@@ -215,34 +263,36 @@ class LatencySampleWriter(BaseWriter):
         # 本批涉及的窗口（cumulative = 已提交累计 + 本批增量），避免长期运行
         # 时每批重发全部历史窗口。
         written_add = market_written_by_window(valid_items, self.summary_interval)
-        stats_rows = [
-            {
-                "window_start": w,
-                "source": self.source,
-                "metric": STAT_WRITTEN,
-                "value": self._committed_written.get(w, 0) + v,
-            }
-            for w, v in sorted(written_add.items())
-        ]
-        try:
-            # 先更新注册表（消除窗口关闭快照竞态）；失败则回滚增量
-            for w, v in written_add.items():
-                self.stats.add(w, {STAT_WRITTEN: v})
-            with self.engine.begin() as conn:
-                conn.execute(pg_insert(LatencySample).values(rows))
-                if stats_rows:
-                    conn.execute(_stats_upsert_stmt(stats_rows))
-            for w, v in written_add.items():
-                self._committed_written[w] = self._committed_written.get(w, 0) + v
-            self._prune_committed_written()
-        except Exception:
-            # 失败：回滚未提交的 written 增量，write_errors 按错误发生时间
-            # 窗口 +1（attempt 计数）；重试时从 _committed_written 重新累计，
-            # 不会重复计数
-            for w, v in written_add.items():
-                self.stats.add(w, {STAT_WRITTEN: -v})
-            self._count_write_error()
-            raise
+        # C-P0-5：_committed_written 读写用锁保护（stop() drain 可能与线程并发）
+        with self._state_lock:
+            stats_rows = [
+                {
+                    "window_start": w,
+                    "source": self.source,
+                    "metric": STAT_WRITTEN,
+                    "value": self._committed_written.get(w, 0) + v,
+                }
+                for w, v in sorted(written_add.items())
+            ]
+            try:
+                # 先更新注册表（消除窗口关闭快照竞态）；失败则回滚增量
+                for w, v in written_add.items():
+                    self.stats.add(w, {STAT_WRITTEN: v})
+                with self.engine.begin() as conn:
+                    conn.execute(pg_insert(LatencySample).values(rows))
+                    if stats_rows:
+                        conn.execute(_stats_upsert_stmt(stats_rows))
+                for w, v in written_add.items():
+                    self._committed_written[w] = self._committed_written.get(w, 0) + v
+                self._prune_committed_written()
+            except Exception:
+                # 失败：回滚未提交的 written 增量，write_errors 按错误发生时间
+                # 窗口 +1（attempt 计数）；重试时从 _committed_written 重新累计，
+                # 不会重复计数
+                for w, v in written_add.items():
+                    self.stats.add(w, {STAT_WRITTEN: -v})
+                self._count_write_error()
+                raise
 
     def _prune_committed_written(self) -> None:
         """裁剪长期运行的 written 累计簿记（2 小时足够覆盖任何现实写入延迟）。"""
@@ -260,8 +310,9 @@ class LatencySampleWriter(BaseWriter):
         if self._final_failed_reported:
             return
         self._final_failed_reported = True
-        rows = self._final_failed_rows
-        self._final_failed_rows = []
+        with self._state_lock:
+            rows = list(self._final_failed_rows)
+            self._final_failed_rows = []
         market = [r for r in rows if r.get("sample_class") == SAMPLE_CLASS_MARKET]
         if not market:
             return

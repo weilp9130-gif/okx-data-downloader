@@ -63,6 +63,17 @@ STAT_STRATEGY_DROPPED = "strategy_events_dropped"
 STAT_WS_CONNECT = "ws_connect_count"
 STAT_WS_RECONNECT = "ws_reconnect_count"
 STAT_WS_MESSAGES = "ws_messages_received"
+# C-P1-6：WS 非行情消息分类（与 parse_errors 严格区分）
+STAT_WS_CONTROL = "ws_control_messages"
+STAT_WS_UNKNOWN = "ws_unknown_messages"
+STAT_WS_PARSE_ERRORS = "ws_parse_errors"
+# C-P1-3：WS 端点连接统计
+STAT_WS_CONNECT_ATTEMPTS = "ws_connect_attempts"
+STAT_WS_CONNECT_FAILURES = "ws_connect_failures"
+STAT_WS_ENDPOINT_FALLBACKS = "ws_endpoint_fallbacks"
+
+# C-P0-4：corrected < -10ms 额外限频 WARNING（每窗口至多一条）
+NEGATIVE_CORRECTED_WARN_MS = -10.0
 
 
 def window_start_for(ts: datetime, interval: int) -> datetime:
@@ -75,17 +86,23 @@ def window_start_for(ts: datetime, interval: int) -> datetime:
 
 
 def percentile(values: List[float], p: float) -> Optional[float]:
-    """线性插值分位数（numpy.percentile linear 语义）"""
+    """线性插值分位数（numpy.percentile linear 语义）。
+
+    输入无需排序：numpy 语义先排序再插值（冒烟实测发现未排序输入会得到
+    p50 > p95 的错误结果，故必须排序）。
+    """
     if not values:
         return None
-    n = len(values)
+    sorted_values = sorted(values)
+    n = len(sorted_values)
     if n == 1:
-        return float(values[0])
+        return float(sorted_values[0])
     rank = p / 100.0 * (n - 1)
     lower = int(math.floor(rank))
     upper = min(lower + 1, n - 1)
     weight = rank - lower
-    return float(values[lower]) * (1.0 - weight) + float(values[upper]) * weight
+    return (float(sorted_values[lower]) * (1.0 - weight)
+            + float(sorted_values[upper]) * weight)
 
 
 def sample_stddev(values: List[float]) -> float:
@@ -95,6 +112,18 @@ def sample_stddev(values: List[float]) -> float:
         return 0.0
     mean = sum(values) / n
     return math.sqrt(sum((x - mean) ** 2 for x in values) / (n - 1))
+
+
+def lag_percentiles(lags: List[float]) -> Dict[str, float]:
+    """event-loop lag 序列的 p50/p95/p99/max（C-P1-2，log-only）。"""
+    if not lags:
+        return {"p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
+    return {
+        "p50": percentile(lags, 50) or 0.0,
+        "p95": percentile(lags, 95) or 0.0,
+        "p99": percentile(lags, 99) or 0.0,
+        "max": max(lags),
+    }
 
 
 def build_summary_row(window_start, source, inst_id, channel, metric, values) -> dict:
@@ -185,7 +214,8 @@ class WindowSummarizer:
 
     - 窗口固定 UTC，按 sample_ts 归属（decision 14/15）
     - 窗口 W 在 now >= W + 2*interval 时关闭（延后一个窗口）
-    - corrected 用样本自身 clock_offset_ms；窗口级校正禁止（P0）
+    - corrected 用样本自身 clock_offset_ms；窗口级校正禁止（P0）；
+      `corrected = value - clock_offset_ms`（C-P0-3 符号约定统一）
     - 关闭时调用 on_close(summary_rows, stats_rows)（UPSERT 到 summaries/stats）
     """
 
@@ -203,6 +233,7 @@ class WindowSummarizer:
         self._lock = threading.Lock()
         self._windows: Dict[datetime, WindowAgg] = {}
         self._closed_windows: set = set()
+        self._neg_corrected_warned: set = set()   # C-P0-4：每窗口至多一条告警
 
     def add_sample(self, sample: dict) -> None:
         """sample: sample_ts / metric / channel / inst_id / value_ms /
@@ -224,10 +255,18 @@ class WindowSummarizer:
                 if value < 0:
                     self.stats.increment(w, STAT_NEG_RAW)
                 if offset is not None:
-                    corrected = value + offset
+                    corrected = value - offset          # C-P0-3: value - offset
                     agg.series[(CORRECTED_METRIC, channel, inst)].append(corrected)
                     if corrected < 0:
                         self.stats.increment(w, STAT_NEG_CORRECTED)
+                    if (corrected < NEGATIVE_CORRECTED_WARN_MS
+                            and w not in self._neg_corrected_warned):
+                        self._neg_corrected_warned.add(w)
+                        logger.warning(
+                            "Negative corrected latency: raw=%.1fms "
+                            "clock_offset=%.1fms corrected=%.1fms",
+                            value, offset, corrected,
+                        )
 
     def tick(self, now: datetime) -> None:
         """关闭满足延后关闭条件的窗口（含只有计数器的窗口）"""
@@ -262,6 +301,9 @@ class WindowSummarizer:
             stale = [w for w in self._closed_windows if w < threshold]
             for w in stale:
                 self._closed_windows.discard(w)
+            stale_neg = [w for w in self._neg_corrected_warned if w < threshold]
+            for w in stale_neg:
+                self._neg_corrected_warned.discard(w)
 
     def is_window_closed(self, w: datetime) -> bool:
         with self._lock:

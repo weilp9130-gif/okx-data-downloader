@@ -552,7 +552,7 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
 | `ws_ping_rtt` | monotonic | 应用层文本 `"ping"` → OKX `"pong"` RTT；唯一 pending ping + 超时 | `__ws__` |
 | `http_rtt` | monotonic 差值 | REST `/api/v5/public/time` 往返（进程观测的 wall-to-wall，可能含 DNS/TCP/TLS/HTTP/服务端处理/连接复用；**非纯网络 RTT**，首请求与后续差异可能巨大）；`clock_offset_ms` 仅诊断 | `__http__` |
 | `raw_ws_receive_latency` | wall | `(recv_ns − exchange_ts_ms×1e6)/1e6`，逐 data 项，同一消息共享 recv_ns。**端到端行情年龄，≠ 网络延迟** | 实际频道 |
-| `corrected_ws_receive_latency` | wall | `raw + 样本自身 clock_offset_ms`；**只存在于 summaries / 用户 SQL**，禁止落 `latency_samples` | 实际频道 |
+| `corrected_ws_receive_latency` | wall | `raw − 样本自身 clock_offset_ms`（C-P0-3 符号约定）；**只存在于 summaries / 用户 SQL**，禁止落 `latency_samples` | 实际频道 |
 | `strategy_latency` | monotonic | `signal_mono − arrival_mono`，含 worker 排队（端到端）；feature+model 之和 ≠ strategy_latency | 触发频道 |
 | `strategy_feature_latency` / `strategy_model_latency` | monotonic | `heavy_v1` 阶段耗时 | 触发频道 |
 | `min/mean/p50/p95/p99/max` | — | 线性插值分位数（numpy 语义，纯 Python） | — |
@@ -565,10 +565,15 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
   Python 运行时），不是网络延迟。p99=25ms 不表示"网络 25ms"。不同频道 ts 语义
   不同（trades=成交时间；bbo-tbt=撮合引擎盘口生成时间；books*=订单簿生成时间），
   禁止无条件横向比较。
-- **corrected**：`clock_offset_ms = OKX server time − 本地`（本机快 → 负）；
-  `corrected = raw + clock_offset_ms`，**必须用样本自身的 offset**（禁止窗口级
-  校正）。`clock_offset_ms` 是 **REST server time based clock offset estimate**，
-  非精确 WS 时钟偏移。
+- **corrected（C-P0-3 符号约定）**：`clock_offset_ms = 本地 − OKX server time`
+  （本机快 → 正；本机慢 → 负）；
+  `corrected = raw − clock_offset_ms`（等价于旧约定 `raw + (server − local)`），
+  **必须用样本自身的 offset**（禁止窗口级校正）。数值示例：本地超前 20ms、
+  真实延迟 30ms → raw=50、offset=+20 → corrected=30；本地落后 20ms → raw=10、
+  offset=−20 → corrected=30。`clock_offset_ms` 是 **REST server time based
+  clock offset estimate**，非精确 WS 时钟偏移；**RTT 用 monotonic 时钟计算**
+  （C-P0-1，不受 NTP/改时影响），offset 用 wall 时钟 midpoint。active offset
+  跳变 > 50ms 记 `CLOCK_OFFSET_JUMP` WARNING（C-P0-2，不拒绝新值）。
 - **PingProbe 与 RFC6455 是两个层次**：OKX 应用层文本 `"ping"`/`"pong"` 与
   WebSocket 控制帧 Ping/Pong 无关；PingProbe 只测前者，`ws_ping_rtt/2` 不得当
   单向延迟。`ws_messages_received` 仅在 `recv()` 成功返回**应用层消息**时 +1；
@@ -581,7 +586,10 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
 - **时间戳**：`sample_ts = recv_ts`（本地接收墙钟时刻）；HTTP 探测
   `sample_ts = t1`（REST 完成时刻）；`arrival_mono_ns` 只存在内存，**禁止持久化**。
 - **负延迟**：不截断；`negative_raw_latency_count`（raw<0 → 交易所/本地时间戳
-  不一致）与 `negative_corrected_latency_count`（校正后仍<0）分开计数 + 限频告警。
+  不一致）与 `negative_corrected_latency_count`（校正后仍<0）分开计数 + 限频告警；
+  `corrected < −10ms` 额外每窗口至多一条
+  `Negative corrected latency: raw=.. clock_offset=.. corrected=..` WARNING
+  （C-P0-4，禁止 clamp 成 0）。
 - **written / write_errors 窗口**：`written` 按每行 `sample_ts` 窗口归属（跨窗口
   批次拆分）；`write_errors` 按**错误发生时间**窗口、每次失败 attempt +1；DB 失败
   绝不入 `dropped`。`written` 允许最终一致（P1-21）：已关闭窗口在 writer
@@ -608,10 +616,26 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
   seqId/prevSeqId）。
 - **SESSION_START**：每次成功连接+订阅后输出结构化日志
   （session/conn_id/start_ts/pid/python/platform/cpu_count/insts/channels/
-  strategy/workload/ping_*/clock_offset_ms）。
+  strategy/workload/ping_*/clock_offset_ms/selected_probe_rtt/active_endpoint）。
+  `selected_probe_rtt` = 当前 active min-RTT 校准探测的 RTT（C-P1-1，判断 offset
+  测量质量：offset=5ms rtt=4ms 与 offset=5ms rtt=250ms 可信度不同）；
+  `active_endpoint` = 当前工作 WS 端点（C-P1-3）。
+- **WS 端点连接统计（C-P1-3）**：系统级 `ws_connect_attempts`（按 URL 尝试）、
+  `ws_connect_failures`、`ws_endpoint_fallbacks`；保留 `ws_connect_count`
+  （session 级）不动。端点回退即时（无退避），仅重连循环用退避。
+- **重连退避（C-P1-5）**：有限指数退避 `[1,2,4,8,16,30,30,...]s` + 均匀 jitter
+  `[0, 0.5×delay]`；首次重连 ≈1s，连续失败逐级增大封顶 30s；连接稳定运行
+  ≥60s 后连续失败计数归零。
+- **WS 消息分类（C-P1-6）**：`ws_control_messages`（文本/JSON ping、pong、
+  subscribe ack/error、notice）、`ws_unknown_messages`（无法识别的 JSON/未知
+  keys）、`ws_parse_errors`（WS 消息 JSON 解码失败）——与 `parse_errors`
+  （market ts/instId）严格区分。
 - **运行时队列遥测（P1-23）**：每汇总窗口与停止时日志
   `writer_queue_depth/writer_queue_capacity/strategy_queue_depth/
   strategy_queue_capacity` 及进程 CPU time/利用率（不进 DB）。
+- **event-loop lag 诊断（C-P1-2）**：`EVENT_LOOP_LAG p50/p95/p99/max`（仅日志，
+  不落库、不改任何 latency 计算）。若 WS P99 高而 lag 也高 → 本机 event-loop
+  主导；lag 正常而 WS P99 高 → 网络问题。
 
 ### 数据库表（3 表）
 
@@ -627,7 +651,9 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
 - `latency_probe_stats`（普通表，系统级）：PK `(window_start, source, metric)`；
   全部计数器（含 `sequence_reset_count / negative_raw|corrected_latency_count /
   http_probe_errors / ws_connect_count / ws_reconnect_count / notice_received /
-  strategy_events_dropped`）。
+  strategy_events_dropped / ws_control_messages / ws_unknown_messages /
+  ws_parse_errors / ws_connect_attempts / ws_connect_failures /
+  ws_endpoint_fallbacks`）。
 
 ### 分析 SQL（Analysis SQL）
 
@@ -641,8 +667,8 @@ SELECT date_trunc('hour', window_start) AS h, metric,
        percentile_cont(0.99) WITHIN GROUP (ORDER BY p99_ms) AS p99_of_p99
 FROM latency_summaries GROUP BY h, metric;
 
--- 样本级 corrected（SQL 派生）
-SELECT sample_ts, value_ms, value_ms + clock_offset_ms AS corrected_ms
+-- 样本级 corrected（SQL 派生；C-P0-3：corrected = raw - clock_offset_ms）
+SELECT sample_ts, value_ms, value_ms - clock_offset_ms AS corrected_ms
 FROM latency_samples
 WHERE metric = 'raw_ws_receive_latency' AND clock_offset_ms IS NOT NULL;
 
@@ -675,6 +701,14 @@ SELECT * FROM latency_samples WHERE inst_id = '__system__' AND session = 0;
   自动删除。
 - **checksum 有意不使用**：2026-06-23 起 OKX 弃用 books/books-l2-tbt/
   books50-l2-tbt 的 checksum 校验（字段恒为 0），连续性验证用 seqId/prevSeqId。
+- **Windows 时钟异常指导**：若启动/运行日志出现持续大 offset（如 +350ms /
+  +1960ms），是系统时钟/时间同步问题，**不得**为消除 WARNING 而调大
+  `CLOCK_WARNING_MS=50`（那是错误优化）。应执行 Windows 时间同步
+  （如 `w32tm /resync` / 配置 NTP）后重测，理想 |offset| < 50ms、更理想 < 10ms；
+  WARNING 的意义就是提示本机 wall-clock 不适合作为高精度延迟基准。
+- **TimescaleDB retention（设计建议，本模块不自动执行）**：`latency_samples`
+  建议配置 30/90/180 天 retention（参数化）与 compression；`latency_summaries`
+  长期保留。数据生命周期变更须单独评审。
 
 ## 日志规范
 
