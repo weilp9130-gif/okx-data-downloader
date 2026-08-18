@@ -22,7 +22,7 @@ N 个独立IP 即可获得约 N 倍的吞吐(一个币一个IP)。
 
 用法
 ----
-    from proxy_pool import ProxyPool
+    from app.proxy.proxy_pool import ProxyPool
     pool = ProxyPool()
     pool.verify_ips()              # 可选：探测每个代理出口IP并统计去重
     proxy = pool.acquire("BTC-USDT-SWAP")   # 获取绑定代理(内部已按IP限速)

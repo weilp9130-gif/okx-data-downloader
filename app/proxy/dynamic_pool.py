@@ -15,11 +15,11 @@ VPN服务商节点不稳定：节点名、出口IP随时可能变化。因此不
   6. 验证端口IP   —— 探测每个端口出口IP并去重
   7. 构建代理池   —— 用可用端口构建 ProxyPool（每IP独立限速）
 
-用法（download_all.py 内置）:
-    python download_all.py --dynamic --pool-size 20
+用法（sync_continuous / backfill 内置）:
+    python sync_continuous.py --dynamic --pool-size 20
 
 或用命令行直接构建:
-    python -m dynamic_pool --pool-size 10 --fresh
+    python -m app.proxy.dynamic_pool --pool-size 10 --fresh
 """
 
 import json

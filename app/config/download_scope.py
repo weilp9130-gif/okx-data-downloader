@@ -6,14 +6,18 @@
 配置示例见项目根目录 download_scope.toml；可用环境变量 DOWNLOAD_SCOPE 指定路径。
 """
 
+from __future__ import annotations
+
 import os
 import tomllib
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
-from ..client.okx_client import OKXClient
 from ..utils.logger import get_logger
 from ..utils.time_utils import parse_date
+
+if TYPE_CHECKING:
+    from ..client.okx_client import OKXClient
 
 logger = get_logger(__name__)
 
@@ -46,8 +50,9 @@ def load_scope(path: Optional[str] = None) -> dict:
     cfg = {k: dict(v) for k, v in _DEFAULTS.items()}
     if os.path.exists(p):
         try:
+            # 兼容带 UTF-8 BOM 的配置文件（Windows 编辑器常加 BOM）
             with open(p, "rb") as f:
-                user = tomllib.load(f)
+                user = tomllib.loads(f.read().decode("utf-8-sig"))
             for section in cfg:
                 if section in user and isinstance(user[section], dict):
                     cfg[section].update(user[section])
@@ -84,6 +89,7 @@ def resolve_instruments(
     if mode == "include":
         return [i for i in include if i not in exclude]
 
+    from ..client.okx_client import OKXClient  # 惰性导入，避免 config↔client 循环
     client = client or OKXClient()
     inst_type = region.get("inst_type", "SWAP")
     settle_ccy = region.get("settle_ccy")
