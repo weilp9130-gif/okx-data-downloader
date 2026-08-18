@@ -15,13 +15,13 @@ from typing import List, Optional
 
 from sqlalchemy import text
 
-from ..database import get_engine
+from ..db.database import get_engine
 from ..downloader.funding import FundingRateDownloader
 from ..downloader.index_price import IndexPriceDownloader
 from ..downloader.mark_price import MarkPriceDownloader
 from ..downloader.open_interest import OpenInterestDownloader
 from ..downloader.trades import TradesDownloader
-from ..okx_client import OKXClient
+from ..client.okx_client import OKXClient
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)

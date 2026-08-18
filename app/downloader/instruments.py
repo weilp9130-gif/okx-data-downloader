@@ -10,10 +10,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..config import Config
-from ..database import get_engine
-from ..models import Instrument
-from ..okx_client import OKXClient
+from ..config.config import Config
+from ..db.database import get_engine
+from ..db.models import Instrument
+from ..client.okx_client import OKXClient
 from ..utils.logger import get_logger
 from ..utils.time_utils import ms_to_datetime
 

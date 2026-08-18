@@ -1,6 +1,6 @@
 """Index Price 下载模块"""
 
-from ..models import IndexPrice, IndexPriceSyncState
+from ..db.models import IndexPrice, IndexPriceSyncState
 from .periodic_candle import PeriodicCandleDownloader
 
 

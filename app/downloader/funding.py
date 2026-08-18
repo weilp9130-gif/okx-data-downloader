@@ -12,10 +12,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..models import FundingRate
-from ..database import get_engine
-from ..okx_client import OKXClient
-from ..config import Config
+from ..db.models import FundingRate
+from ..db.database import get_engine
+from ..client.okx_client import OKXClient
+from ..config.config import Config
 from ..utils.logger import get_logger
 from ..utils.time_utils import (
     as_naive_utc,

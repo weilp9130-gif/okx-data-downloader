@@ -12,8 +12,8 @@ from typing import List
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..conflict import DataConflictDetector, trade_core_hash
-from ..database import get_engine
+from ..quality.conflict import DataConflictDetector, trade_core_hash
+from ..db.database import get_engine
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -146,7 +146,7 @@ class OrderBookWriter(BaseWriter):
             self._flush_sync_state(state_rows)
 
     def _flush_snapshots(self, rows: List[dict]) -> None:
-        from ..models import OrderBookSnapshot
+        from ..db.models import OrderBookSnapshot
 
         for row in rows:
             row.pop("__type", None)
@@ -174,7 +174,7 @@ class OrderBookWriter(BaseWriter):
         logger.info("OrderBookWriter flushed %d snapshots", len(rows))
 
     def _flush_factors(self, rows: List[dict]) -> None:
-        from ..models import OrderBookFactor
+        from ..db.models import OrderBookFactor
 
         for row in rows:
             row.pop("__type", None)
@@ -198,7 +198,7 @@ class OrderBookWriter(BaseWriter):
         logger.info("OrderBookWriter flushed %d factors", len(rows))
 
     def _flush_sync_state(self, rows: List[dict]) -> None:
-        from ..models import OrderBookSyncState
+        from ..db.models import OrderBookSyncState
 
         # 同一 inst_id 只保留最新一条，避免同批 UPSERT 冲突
         latest: dict = {}
@@ -250,7 +250,7 @@ class MarketDataWriter(BaseWriter):
 
     def _flush_target(self, target: str, rows: List[dict]) -> None:
         if target == "open_interest_realtime":
-            from ..models import OpenInterestRealtime
+            from ..db.models import OpenInterestRealtime
             stmt = pg_insert(OpenInterestRealtime).values(rows)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["inst_id", "ts"],
@@ -264,7 +264,7 @@ class MarketDataWriter(BaseWriter):
                 },
             )
         elif target == "funding_rates":
-            from ..models import FundingRate
+            from ..db.models import FundingRate
             stmt = pg_insert(FundingRate).values(rows)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["inst_id", "ts"],
@@ -275,7 +275,7 @@ class MarketDataWriter(BaseWriter):
                 },
             )
         elif target == "mark_prices":
-            from ..models import MarkPrice
+            from ..db.models import MarkPrice
             stmt = pg_insert(MarkPrice).values(rows)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["inst_id", "bar", "ts"],
@@ -292,7 +292,7 @@ class MarketDataWriter(BaseWriter):
                 },
             )
         elif target == "index_prices":
-            from ..models import IndexPrice
+            from ..db.models import IndexPrice
             stmt = pg_insert(IndexPrice).values(rows)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["inst_id", "bar", "ts"],
@@ -309,7 +309,7 @@ class MarketDataWriter(BaseWriter):
                 },
             )
         elif target == "candles":
-            from ..models import Candle
+            from ..db.models import Candle
             stmt = pg_insert(Candle).values(rows)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["inst_id", "bar", "ts"],
@@ -339,7 +339,7 @@ class TradeWriter(BaseWriter):
         self.conflicts = DataConflictDetector()
 
     def _flush(self, batch: List[dict]) -> None:
-        from ..models import Trade
+        from ..db.models import Trade
 
         if not batch:
             return

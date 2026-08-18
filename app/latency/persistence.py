@@ -18,8 +18,8 @@ from typing import Dict, List
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..database import get_engine
-from ..models import LatencyProbeStats, LatencySample, LatencySummary
+from ..db.database import get_engine
+from ..db.models import LatencyProbeStats, LatencySample, LatencySummary
 from ..realtime.writer import BaseWriter
 from ..utils.logger import get_logger
 from .metrics import (

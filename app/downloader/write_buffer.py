@@ -26,8 +26,8 @@ from typing import List, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..database import get_engine
-from ..models import Candle
+from ..db.database import get_engine
+from ..db.models import Candle
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)

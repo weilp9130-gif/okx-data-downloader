@@ -10,8 +10,10 @@ class TestImports(unittest.TestCase):
         self.assertTrue(Config)
 
     def test_core_modules(self):
-        from app import database, db_docker, models, okx_client, proxy_pool  # noqa: F401
-        from app.dynamic_pool import RUNTIME_DIR, LISTENERS_FILE
+        from app.db import database, db_docker, models  # noqa: F401
+        from app.client import okx_client  # noqa: F401
+        from app.proxy import proxy_pool  # noqa: F401
+        from app.proxy.dynamic_pool import RUNTIME_DIR, LISTENERS_FILE
         from pathlib import Path
         self.assertEqual(RUNTIME_DIR.name, "runtime")
         self.assertEqual(LISTENERS_FILE.name, "mihomo_listeners.yaml")

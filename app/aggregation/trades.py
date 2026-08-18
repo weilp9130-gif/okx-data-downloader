@@ -10,8 +10,8 @@ from typing import Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..database import get_engine
-from ..models import TradeAggregate
+from ..db.database import get_engine
+from ..db.models import TradeAggregate
 from ..utils.logger import get_logger
 from ..utils.time_utils import bar_to_seconds
 

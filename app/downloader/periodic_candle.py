@@ -8,9 +8,9 @@ from typing import List, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..config import Config
-from ..database import get_engine
-from ..okx_client import OKXClient
+from ..config.config import Config
+from ..db.database import get_engine
+from ..client.okx_client import OKXClient
 from ..utils.logger import get_logger
 from ..utils.time_utils import ms_to_datetime, utc_ms_timestamp
 

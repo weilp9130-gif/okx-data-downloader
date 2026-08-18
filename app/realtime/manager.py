@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..aggregation.orderbook import OrderBookFactorCalculator
-from ..config import Config
+from ..config.config import Config
 from ..utils.logger import get_logger
 from .market_data import MarketDataHandler
 from .okx_ws import OKXWebSocketClient

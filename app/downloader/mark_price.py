@@ -1,6 +1,6 @@
 """Mark Price 下载模块"""
 
-from ..models import MarkPrice, MarkPriceSyncState
+from ..db.models import MarkPrice, MarkPriceSyncState
 from .periodic_candle import PeriodicCandleDownloader
 
 

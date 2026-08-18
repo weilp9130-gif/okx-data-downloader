@@ -18,15 +18,24 @@
 
 ```
 okx_data_downloader
-├── app/                 # ★核心库（包）
+├── app/                 # ★核心库（按功能分层）
 │   ├── __init__.py
-│   ├── config.py        # 配置模块（dataclass + .env）
-│   ├── database.py      # 数据库连接（SQLAlchemy Engine/Session + Docker引导）
-│   ├── db_docker.py     # Docker数据库引导（下载前自动检测/启动timescale容器）
-│   ├── models.py        # ORM数据模型（candles/funding_rates/download_state 等）
-│   ├── okx_client.py    # OKX API客户端（限速/重试/线程本地Session/代理池）
-│   ├── proxy_pool.py    # IP代理池（每IP平滑限速/健康管理/IP去重探测）
-│   ├── dynamic_pool.py  # ★动态IP代理池（自动发现/测IP/应用listeners）
+│   ├── config/          # 配置模块
+│   │   ├── __init__.py  #   re-export: Config / load_scope 等
+│   │   ├── config.py    #   dataclass 配置（OKX/DB/Logging/OrderBook/Retention + .env）
+│   │   └── download_scope.py # 下载范围配置（download_scope.toml）
+│   ├── client/          # OKX API客户端
+│   │   ├── __init__.py
+│   │   └── okx_client.py # 限速/重试/线程本地Session/代理池
+│   ├── db/              # 数据库模块
+│   │   ├── __init__.py  #   re-export: get_engine / init_db / Candle 等
+│   │   ├── database.py  #   SQLAlchemy Engine/Session + Docker引导
+│   │   ├── db_docker.py #   Docker数据库引导（下载前自动检测/启动timescale容器）
+│   │   └── models.py    #   ORM数据模型（candles/funding_rates/download_state 等）
+│   ├── proxy/           # 代理池模块
+│   │   ├── __init__.py
+│   │   ├── proxy_pool.py #   IP代理池（每IP平滑限速/健康管理/IP去重探测）
+│   │   └── dynamic_pool.py # 动态IP代理池（自动发现/测IP/应用listeners）
 │   ├── latency/         # ★行情延迟探针（独立于实时管线）
 │   │   ├── __init__.py
 │   │   ├── metrics.py   # 分位数 / WindowSummarizer / 系统级计数器注册表
@@ -34,20 +43,42 @@ okx_data_downloader
 │   │   ├── ws_probe.py  # 唯一 recv_loop / PingProbe / seq 检测 / notice
 │   │   ├── mock_strategy.py # none/light/heavy_v1 独立 worker
 │   │   └── persistence.py   # LatencySampleWriter + summaries/stats UPSERT
-│   ├── downloader/
+│   ├── downloader/      # 历史数据下载
 │   │   ├── __init__.py
 │   │   ├── candles.py   # K线下载模块（缺失窗口检测/回溯/批量入库）
-│   │   └── funding.py   # 资金费率下载模块
-│   └── utils/
+│   │   ├── funding.py   # 资金费率下载模块
+│   │   ├── instruments.py / trades.py / open_interest.py 等
+│   │   └── write_buffer.py
+│   ├── realtime/        # WebSocket 实时采集
+│   │   ├── manager.py / writer.py / okx_ws.py / trades.py
+│   │   ├── orderbook.py / market_data.py / recovery.py
+│   │   └── __init__.py
+│   ├── aggregation/     # 数据聚合（TradeAggregator / OrderBookFactorCalculator）
+│   ├── quality/         # 数据质量检测
+│   │   ├── __init__.py  #   re-export: DataQualityValidator / DataConflictDetector
+│   │   ├── validator.py #   三层校验
+│   │   └── conflict.py  #   DATA_CONFLICT 检测（迁移自 app/conflict.py）
+│   └── utils/           # 通用工具
 │       ├── __init__.py
 │       ├── logger.py    # 日志系统（控制台+文件轮转）
 │       └── time_utils.py# 时间工具
-├── backfill.py          # ★入口：REST 历史回填（instruments/oi/mark/index/funding/trades/trade_aggregates/all）
-├── sync_continuous.py   # ★入口：K线连续同步（先全量追赶，再低资源实时同步，含IP代理池）
-├── sync_realtime.py     # ★入口：WebSocket 实时采集（trades/orderbook/oi/funding/mark/index/kline）
-├── latency_probe.py     # ★入口：行情延迟探针（延迟分布/窗口百分位/策略基准）
-├── quality_report.py    # ★入口：数据质量报告（三层校验 + 索引验证）
-├── tests/               # 单元测试（离线，python -m unittest discover -s tests）
+├── cli/                 # ★CLI 实现包（python -m cli.backfill 亦可运行）
+│   ├── backfill.py
+│   ├── sync_continuous.py
+│   ├── sync_realtime.py
+│   ├── latency_probe.py
+│   └── quality_report.py
+├── backfill.py          # 根薄壳 wrapper（转发 cli.backfill）
+├── sync_continuous.py   # 根薄壳 wrapper（转发 cli.sync_continuous）
+├── sync_realtime.py     # 根薄壳 wrapper（转发 cli.sync_realtime）
+├── latency_probe.py     # 根薄壳 wrapper（转发 cli.latency_probe）
+├── quality_report.py    # 根薄壳 wrapper（转发 cli.quality_report）
+├── tests/               # 单元测试（离线，按功能分目录）
+│   ├── path_utils.py    #   FIXTURES / 项目根路径常量
+│   ├── test_imports.py / test_package_layout.py
+│   ├── downloader/ realtime/ aggregation/ quality/ latency/
+│   ├── client/ db/ proxy/ config/ cli/ utils/   # 与 app 子包对应
+│   └── fixtures/        #   公共测试夹具（JSON）
 ├── pyproject.toml       # 包元数据/依赖（可选 pip install -e .）
 ├── env.template         # 环境变量模板
 ├── requirements.txt     # Python依赖
@@ -55,8 +86,11 @@ okx_data_downloader
 └── logs/                # 日志目录（已忽略）
 ```
 
-> 代码组织：`app/` 为可复用的库代码包，根目录四个入口脚本是面向任务的 CLI，
-> 均可直接 `python xxx.py` 运行。单元测试位于 `tests/`（离线，不依赖网络/数据库）。
+> 代码组织：`app/` 为可复用的库代码包（按功能分层，包级 `__init__.py` re-export
+> 高层 API，如 `from app.config import Config` / `from app.db import get_engine`）；
+> 命令行实现统一在 `cli/` 包，根目录五个同名入口为薄壳 wrapper，均可直接
+> `python xxx.py` 运行，也可 `python -m cli.xxx`。单元测试位于 `tests/`（离线，
+> 不依赖网络/数据库，按功能分目录）。
 ## 环境要求
 
 - Python 3.9+
@@ -99,7 +133,7 @@ cp env.template .env      # Windows: copy env.template .env
 
 ## Docker 数据库自动启动
 
-运行任何下载/同步脚本前，程序会自动确保数据库可用（`db_docker.py`，挂在 `database.get_engine()` 内，所有入口自动生效）：
+运行任何下载/同步脚本前，程序会自动确保数据库可用（`app/db/db_docker.py`，挂在 `database.get_engine()` 内，所有入口自动生效）：
 
 1. **数据库已可连接**（`DB_HOST:DB_PORT` 端口可达）→ 直接用现有数据库，不打扰；
 2. **数据库不可达** 且本机有 Docker（`DB_USE_DOCKER` 非 `false`）→ 自动检测 Docker，
@@ -487,9 +521,9 @@ python backfill.py --type funding --inst ETH-USDT-SWAP --limit-days 30
 
 ```python
 from app.config import Config
-from app.okx_client import OKXClient
+from app.client import OKXClient
 from app.downloader.candles import CandleDownloader
-from app.database import init_db, dispose_engine
+from app.db import init_db, dispose_engine
 from datetime import datetime, timedelta
 
 init_db()
@@ -510,7 +544,7 @@ dispose_engine()
 
 ```bash
 # 离线测试（不依赖网络/数据库）
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v
 ```
 
 ## 行情延迟探针（latency_probe）— Market-Data Latency Probe

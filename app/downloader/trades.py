@@ -5,11 +5,11 @@ from typing import Dict, List, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ..config import Config
-from ..conflict import DataConflictDetector, trade_core_hash
-from ..database import get_engine
-from ..models import Trade, TradesSyncState
-from ..okx_client import OKXClient
+from ..config.config import Config
+from ..quality.conflict import DataConflictDetector, trade_core_hash
+from ..db.database import get_engine
+from ..db.models import Trade, TradesSyncState
+from ..client.okx_client import OKXClient
 from ..utils.logger import get_logger
 from ..utils.time_utils import ms_to_datetime
 

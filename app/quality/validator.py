@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from ..database import get_engine
+from ..db.database import get_engine
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -453,7 +453,7 @@ class DataQualityValidator:
     def _save_state(self, data_type: str, inst_id: str) -> None:
         """保存验证状态到 data_quality_state"""
         from sqlalchemy.dialects.postgresql import insert as pg_insert
-        from ..models import DataQualityState
+        from ..db.models import DataQualityState
 
         now = datetime.now(timezone.utc)
         row = {
