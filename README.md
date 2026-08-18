@@ -606,8 +606,14 @@ WS 端点默认 `wss://ws.okx.com:8443/ws/v5/public`，不可达时自动回退
   真实延迟 30ms → raw=50、offset=+20 → corrected=30；本地落后 20ms → raw=10、
   offset=−20 → corrected=30。`clock_offset_ms` 是 **REST server time based
   clock offset estimate**，非精确 WS 时钟偏移；**RTT 用 monotonic 时钟计算**
-  （C-P0-1，不受 NTP/改时影响），offset 用 wall 时钟 midpoint。active offset
-  跳变 > 50ms 记 `CLOCK_OFFSET_JUMP` WARNING（C-P0-2，不拒绝新值）。
+   （C-P0-1，不受 NTP/改时影响），offset 用 wall 时钟 midpoint。active offset
+   跳变 > 50ms 记 `CLOCK_OFFSET_JUMP` WARNING（C-P0-2，不拒绝新值）。
+- **`clock_offset_ms` 符号约定变更（2026-08 起）**：历史版本持久化的
+   `latency_samples.clock_offset_ms` 为旧约定 `server − local`（`corrected = raw +
+   offset`）。新版本统一为 C-P0-3 `local − server`（`corrected = raw − offset`）。
+   若库中存在旧约定行，迁移 SQL：`UPDATE latency_samples SET clock_offset_ms =
+   -clock_offset_ms WHERE clock_offset_ms IS NOT NULL;`（summaries 的
+   `last_clock_offset_ms` 同理）。
 - **PingProbe 与 RFC6455 是两个层次**：OKX 应用层文本 `"ping"`/`"pong"` 与
   WebSocket 控制帧 Ping/Pong 无关；PingProbe 只测前者，`ws_ping_rtt/2` 不得当
   单向延迟。`ws_messages_received` 仅在 `recv()` 成功返回**应用层消息**时 +1；
@@ -757,6 +763,7 @@ SELECT * FROM latency_samples WHERE inst_id = '__system__' AND session = 0;
 
 - 组件名 = 模块名去掉 `app.` 前缀（`app.downloader.candles` → `downloader.candles`）；入口脚本用脚本名（`backfill`/`sync_continuous`/`sync_realtime`/`quality_report`）
 - 控制台简洁（无日期），日志文件完整（带日期毫秒）
+- 2026-08 模块重构后，被移动模块的组件名随新路径变化：`app.database` → `db.database`、`app.okx_client` → `client.okx_client`、`app.proxy_pool` → `proxy.proxy_pool`、`app.conflict` → `quality.conflict` 等；CLI 入口组件名不变
 
 **级别规则**
 
@@ -841,6 +848,37 @@ A: 不是强制要求。代码会尝试创建hypertable，若TimescaleDB不可�
 
 **Q: 支持哪些时间粒度？**
 A: OKX支持 `1m/3m/5m/15m/30m/1H/2H/4H/12H/1D/1W/1M` 等13种。
+
+## 更新记录
+
+### 2026-08-18（v1.1.0）
+
+- **按功能整理模块**：`app/` 子包化（client/db/proxy/config/downloader/realtime/quality/latency），CLI 收拢至 `cli/`，测试按功能分组；新增 `tests/test_package_layout.py` 布局守卫。
+- **latency 探针修复**：时钟偏移符号约定统一为 C-P0-3（`local − server`，`corrected = raw − offset`）；WebSocket 连接超时默认走 443 端口；`clock_offset_ms` 迁移 SQL 见上文。
+- **审查修复**：`download_scope` 循环导入修复（惰性 OKXClient 导入 + `TYPE_CHECKING`）、`app.db` 惰性模型 re-export（PEP 562 `__getattr__`）、`download_scope.toml` UTF-8 BOM 兼容解析、代理池 docstring 路径更新。
+- **功能测试结论**（2026-08-18，真实 OKX REST/WS + PostgreSQL）：
+  - 193 个单元测试全绿（含 3 个布局守卫）；`compileall` 通过；pyflakes 无新增告警
+  - REST 回填 6 类全部通过（instruments/mark/index/funding/oi/trades，count/max(ts)/sync_state 三维判定均有变化）
+  - `trades` 唯一性按主键 `(inst_id, trade_id, ts)` 校验零重复（全表 546,186 行无重复三元组）
+  - WebSocket 实时（trades/mark/oi）订阅与写库通过，窗口内三类表均有新增
+  - latency_probe 采样/汇总入库通过（本机时钟落后 server ~1.56s，raw 负延迟为文档化时钟偏移语义，corrected 均非负）
+  - sync_continuous 阶段2 多轮增量 + 优雅退出（flush 队列 + 最终汇总 + DB 连接释放）通过
+  - quality_report 正常，`--fail-on-issue` 退出码语义保留（有 issues 时返回 1）
+  - 冷启动新库测试通过（`--init-db-only` 建 26 张表 + 首次 instruments 回填 451 条；测试库已清理）
+
+**Benchmark Environment（2026-08-18 实测）**
+
+| 项 | 值 |
+|----|----|
+| Python | 3.13.14 |
+| requests / psycopg2 | 2.34.2 / 2.9.12 |
+| OS | Windows 10 (10.0.19045) x64 |
+| Proxy | 1 个（系统代理 127.0.0.1:7888，Clash Verge；REST 经代理，未启用动态代理池） |
+| Workers | 1（backfill 顺序拉取） |
+| Database | PostgreSQL 16.14 + TimescaleDB 2.29.1 |
+| 结果 | 1440 行 / 4.75s ≈ **303 rows/s**、**2.95 pages/s**（mark 1m × 1 天） |
+
+> 历史基线 95 pages/s 为 32 IP 动态代理池 + 高并发场景；本次为单代理顺序拉取，瓶颈为代理链路 RTT（冷连接 ~850ms、热连接 ~200–300ms），非代码回归（全部请求成功、0 错误）。
 
 ## 许可证
 
