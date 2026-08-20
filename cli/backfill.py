@@ -1,9 +1,10 @@
 """REST 历史数据回填入口
 
-支持 instruments / oi / mark / index / funding / trades / trade_aggregates / all。
+支持 instruments / candles / oi / mark / index / funding / trades / trade_aggregates / all。
 
 示例：
     python backfill.py --type instruments
+    python backfill.py --type candles --inst BTC-USDT-SWAP --bar 1D,1H --start 2024-01-01 --end 2024-02-01
     python backfill.py --type mark --inst BTC-USDT-SWAP --bar 1D --start 2024-01-01 --end 2024-02-01
     python backfill.py --type all --inst BTC-USDT-SWAP --limit-days 1
     python backfill.py --type all --inst BTC-USDT-SWAP --allow-large-backfill
@@ -18,6 +19,7 @@ from typing import List, Optional
 from app.aggregation.trades import TradeAggregator
 from app.config.config import Config
 from app.db.database import init_db
+from app.downloader.candles import CandleDownloader
 from app.downloader.funding import FundingRateDownloader
 from app.downloader.index_price import IndexPriceDownloader
 from app.downloader.instruments import InstrumentDownloader
@@ -27,12 +29,14 @@ from app.downloader.trades import TradesDownloader
 from app.config.download_scope import load_scope, scope_default
 from app.client.okx_client import OKXClient
 from app.utils.logger import get_logger
+from app.utils.progress import ProgressWriter
 from app.utils.time_utils import bar_to_seconds, parse_date
 
 logger = get_logger("backfill")
 
 # 单一数据类型
 SINGLE_TYPES = [
+    "candles",
     "instruments",
     "oi",
     "mark",
@@ -130,6 +134,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅初始化数据库表结构，不执行下载",
     )
+    parser.add_argument(
+        "--progress-file",
+        dest="progress_file",
+        help="任务进度 JSONL 输出路径（Web Worker 使用）",
+    )
+    parser.add_argument(
+        "--overwrite",
+        dest="overwrite",
+        action="store_true",
+        help="覆盖已有数据（默认幂等补缺）",
+    )
     return parser
 
 
@@ -151,6 +166,16 @@ def _resolve_time_range(args, scope=None) -> tuple:
     else:
         start = end.replace(year=end.year - 1)
     return start, end
+
+
+def _resolve_bars(args) -> List[str]:
+    """解析 --bar（支持逗号分隔的多个周期），返回去重后的列表"""
+    bars = [b.strip() for b in (args.bar or "1D").split(",") if b.strip()]
+    seen = []
+    for b in bars:
+        if b not in seen:
+            seen.append(b)
+    return seen or ["1D"]
 
 
 def _resolve_index_inst(args) -> str:
@@ -197,9 +222,10 @@ def _estimate(data_type: str, args, start: datetime, end: datetime) -> dict:
             "span": "当前快照（OKX 无历史 OI 端点）",
         }
 
-    if data_type in ("mark", "index"):
+    if data_type in ("candles", "mark", "index"):
         try:
-            interval = bar_to_seconds(args.bar)
+            bars = _resolve_bars(args)
+            interval = min(bar_to_seconds(b) for b in bars)
         except ValueError:
             interval = 86400
         rows = int(span_seconds // interval) if interval else 0
@@ -246,13 +272,43 @@ def _print_dry_run(types: List[str], args, start: datetime, end: datetime) -> No
 
 
 def _run_one(data_type: str, args, client: OKXClient,
-             start: datetime, end: datetime) -> int:
+             start: datetime, end: datetime,
+             progress: Optional[ProgressWriter] = None) -> int:
     """执行单个数据类型的回填，返回写入行数"""
     cfg = Config()
 
+    if data_type == "candles":
+        bars = _resolve_bars(args)
+        est = _estimate("candles", args, start, end)
+        expected = int(est["rows"]) if est["rows"] else 0
+        dl = CandleDownloader(client=client, cfg=cfg)
+        cumulative = 0
+
+        def _on_progress(n: int) -> None:
+            nonlocal cumulative
+            cumulative += n
+            if progress is not None:
+                progress.progress(
+                    percent=(min(cumulative / expected * 100.0, 100.0)
+                             if expected else None),
+                    written=cumulative,
+                    expected=expected,
+                )
+
+        total = 0
+        for bar in bars:
+            count = dl.download_range(
+                inst_id=args.inst, bar=bar, start=start, end=end,
+                overwrite=args.overwrite, on_progress=_on_progress,
+            )
+            total += count
+            logger.info("Candles 回填完成: %s | %s | %d 条", args.inst, bar, count)
+        return total
+
     if data_type == "instruments":
         count = InstrumentDownloader(client=client, cfg=cfg).download(
-            inst_type=args.inst_type
+            inst_type=args.inst_type,
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("Instruments 回填完成，写入/更新 %d 条", count)
         return count
@@ -260,14 +316,16 @@ def _run_one(data_type: str, args, client: OKXClient,
     if data_type == "oi":
         # OKX 无历史 OI 端点，只取当前快照；bar 固定为 "current"
         count = OpenInterestDownloader(client=client, cfg=cfg).download(
-            inst_id=args.inst, bar="current"
+            inst_id=args.inst, bar="current",
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("OpenInterest 回填完成，写入/更新 %d 条", count)
         return count
 
     if data_type == "mark":
         count = MarkPriceDownloader(client=client, cfg=cfg).download_range(
-            inst_id=args.inst, bar=args.bar, start=start, end=end
+            inst_id=args.inst, bar=args.bar, start=start, end=end,
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("MarkPrice 回填完成，写入/更新 %d 条", count)
         return count
@@ -275,21 +333,24 @@ def _run_one(data_type: str, args, client: OKXClient,
     if data_type == "index":
         index_inst = _resolve_index_inst(args)
         count = IndexPriceDownloader(client=client, cfg=cfg).download_range(
-            inst_id=index_inst, bar=args.bar, start=start, end=end
+            inst_id=index_inst, bar=args.bar, start=start, end=end,
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("IndexPrice 回填完成: %s，写入/更新 %d 条", index_inst, count)
         return count
 
     if data_type == "funding":
         count = FundingRateDownloader(client=client, cfg=cfg).download_range(
-            inst_id=args.inst, start=start, end=end
+            inst_id=args.inst, start=start, end=end,
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("FundingRate 回填完成，写入/更新 %d 条", count)
         return count
 
     if data_type == "trades":
         count = TradesDownloader(client=client, cfg=cfg).download_range(
-            inst_id=args.inst, start=start, end=end, max_pages=args.max_pages
+            inst_id=args.inst, start=start, end=end, max_pages=args.max_pages,
+            on_progress=(lambda n: progress.written(n) if progress else None),
         )
         logger.info("Trades 回填完成，写入/更新 %d 条", count)
         return count
@@ -344,13 +405,24 @@ def main() -> int:
     init_db()
     client = OKXClient()
 
+    progress = ProgressWriter(args.progress_file).open() if args.progress_file else None
     failures = []
-    for t in types:
-        try:
-            _run_one(t, args, client, start, end)
-        except Exception as e:
-            failures.append((t, str(e)))
-            logger.error("回填失败: %s | %s", t, e)
+    try:
+        for t in types:
+            try:
+                if progress is not None:
+                    progress.stage(t)
+                written = _run_one(t, args, client, start, end, progress=progress)
+                if progress is not None:
+                    progress.done(written=written)
+            except Exception as e:
+                failures.append((t, str(e)))
+                if progress is not None:
+                    progress.error(str(e))
+                logger.error("回填失败: %s | %s", t, e)
+    finally:
+        if progress is not None:
+            progress.close()
 
     if failures:
         logger.error("以下类型回填失败: %s", ", ".join(t for t, _ in failures))

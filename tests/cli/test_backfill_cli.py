@@ -1,11 +1,13 @@
 """Phase 9 回归测试：backfill CLI 参数解析 / dry-run 估算 / 质量问题收集"""
 
 import unittest
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from cli.backfill import (
     PAGE_LIMIT,
     _estimate,
+    _resolve_bars,
     _resolve_index_inst,
     _resolve_time_range,
     _resolve_types,
@@ -28,6 +30,8 @@ class _Args:
         self.max_pages = kw.get("max_pages", 10)
         self.allow_large = kw.get("allow_large", False)
         self.dry_run = kw.get("dry_run", False)
+        self.overwrite = kw.get("overwrite", False)
+        self.progress_file = kw.get("progress_file")
 
 
 class TestResolveTypes(unittest.TestCase):
@@ -83,6 +87,20 @@ class TestResolveIndexInst(unittest.TestCase):
         self.assertEqual(_resolve_index_inst(_Args(inst="BTC-USDT")), "BTC-USDT")
 
 
+class TestResolveBars(unittest.TestCase):
+    def test_single_bar(self):
+        self.assertEqual(_resolve_bars(_Args(bar="1D")), ["1D"])
+
+    def test_comma_separated(self):
+        self.assertEqual(_resolve_bars(_Args(bar="1m,1H,1D")), ["1m", "1H", "1D"])
+
+    def test_whitespace_and_dedup(self):
+        self.assertEqual(_resolve_bars(_Args(bar="1m, 1H,1m")), ["1m", "1H"])
+
+    def test_empty_defaults_to_1d(self):
+        self.assertEqual(_resolve_bars(_Args(bar="")), ["1D"])
+
+
 class TestDryRunEstimate(unittest.TestCase):
     def setUp(self):
         self.end = datetime(2026, 8, 16, tzinfo=timezone.utc)
@@ -92,6 +110,16 @@ class TestDryRunEstimate(unittest.TestCase):
         est = _estimate("mark", _Args(bar="1D"), self.start, self.end)
         self.assertEqual(est["rows"], 10)
         self.assertEqual(est["requests"], 1)
+
+    def test_candles_estimate_uses_min_interval(self):
+        est = _estimate("candles", _Args(bar="1D,1H"), self.start, self.end)
+        # 10 天按 1H 估算 = 240 根
+        self.assertEqual(est["rows"], 240)
+        self.assertEqual(est["requests"], 3)
+
+    def test_candles_estimate_single_bar(self):
+        est = _estimate("candles", _Args(bar="1D"), self.start, self.end)
+        self.assertEqual(est["rows"], 10)
 
     def test_funding_estimate(self):
         est = _estimate("funding", _Args(), self.start, self.end)
@@ -113,6 +141,7 @@ class TestDryRunEstimate(unittest.TestCase):
         self.assertEqual(est["rows"], 10 * 24 * 60)
 
 
+@pytest.mark.integration
 class TestCollectIssues(unittest.TestCase):
     def test_clean_report_has_no_issues(self):
         v = DataQualityValidator()

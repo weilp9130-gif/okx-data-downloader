@@ -53,6 +53,7 @@ class CandleDownloader:
         end: datetime,
         overwrite: bool = False,
         list_time: Optional[datetime] = None,
+        on_progress=None,
     ) -> int:
         """下载指定时间范围内的缺失K线（先查库，只下载缺失窗口）
 
@@ -71,6 +72,7 @@ class CandleDownloader:
             list_time: 合约实际上线时间（OKX instruments 的 listTime）。
                 用于精确判定"上市首日"的理论条数，避免库内头部被截断时
                 该缺口被永久漏检。
+            on_progress: 可选回调 on_progress(batch_written)，每批写入后调用
 
         Returns:
             int: 实际写入的K线条数
@@ -120,7 +122,7 @@ class CandleDownloader:
         for ws, we in reversed(windows):
             done += 1
             written, had_data = self._fetch_backtrack(
-                inst_id, bar, ws, we, overwrite
+                inst_id, bar, ws, we, overwrite, on_progress=on_progress
             )
             if not had_data and we < end_ms:
                 break
@@ -298,6 +300,7 @@ class CandleDownloader:
         start_ms: int,
         end_ms: int,
         overwrite: bool = False,
+        on_progress=None,
     ) -> Tuple[int, bool]:
         """从end往回回溯下载 [start_ms, end_ms] 窗口，边拉边分批入库
 
@@ -348,9 +351,12 @@ class CandleDownloader:
             # 攒够一批立即写库，避免一次性积累海量内存。
             # 每批用独立短连接(不持连接)，worker数量不受DB连接池限制
             if len(collected) >= self.BULK_SIZE * 4:
-                total_written += self._save_candles(
+                batch_written = self._save_candles(
                     inst_id, bar, collected, overwrite
                 )
+                total_written += batch_written
+                if on_progress is not None:
+                    on_progress(batch_written)
                 collected.clear()
 
             if oldest_ts <= start_ms:
@@ -360,9 +366,12 @@ class CandleDownloader:
             after_ms = oldest_ts
 
         if collected:
-            total_written += self._save_candles(
+            batch_written = self._save_candles(
                 inst_id, bar, collected, overwrite
             )
+            total_written += batch_written
+            if on_progress is not None:
+                on_progress(batch_written)
         return total_written, had_data
 
     def _save_candles(
@@ -508,10 +517,12 @@ class CandleDownloader:
 
     def fetch_window(
         self, inst_id: str, bar: str, ws_ms: int, we_ms: int,
-        overwrite: bool = False,
+        overwrite: bool = False, on_progress=None,
     ) -> int:
         """下载单个缺失窗口，返回写入行数（线程安全，可多线程并行调用）"""
-        written, _ = self._fetch_backtrack(inst_id, bar, ws_ms, we_ms, overwrite)
+        written, _ = self._fetch_backtrack(
+            inst_id, bar, ws_ms, we_ms, overwrite, on_progress=on_progress
+        )
         return written
 
     def mark_verified(

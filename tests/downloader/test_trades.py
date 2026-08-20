@@ -2,12 +2,14 @@
 
 import json
 import unittest
+import pytest
 
 from tests.path_utils import FIXTURES
 
 from app.downloader.trades import TradesDownloader
 
 
+@pytest.mark.integration
 class TestTradesDownloader(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

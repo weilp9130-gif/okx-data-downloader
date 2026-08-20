@@ -750,6 +750,86 @@ SELECT * FROM latency_samples WHERE inst_id = '__system__' AND session = 0;
   建议配置 30/90/180 天 retention（参数化）与 compression；`latency_summaries`
   长期保留。数据生命周期变更须单独评审。
 
+## Web 管理后台（OKX Quant Platform）
+
+项目升级为 **模块化单体 + Web 管理后台 + 独立 Worker**：现有已测试的 OKX REST/WS、
+下载、恢复、数据库、质量、latency_probe 全部保留，Web 平台通过「任务接口」在其上层
+指挥。**Web 与 Worker 只通过 PostgreSQL 通信**，Web 重启不影响运行中任务。
+
+### 启动（两个独立进程）
+
+```bash
+# 进程1：任务 Worker（独立进程，可多开；DB 原子认领任务）
+python worker.py
+
+# 进程2：Web 后台（FastAPI，默认 http://127.0.0.1:8000）
+python webui.py
+```
+
+可选环境变量：`WEBUI_HOST` / `WEBUI_PORT`（默认 `127.0.0.1:8000`）、
+`WORKER_NAME` / `WORKER_NODE` / `WORKER_POLL_INTERVAL`（默认 2s）。
+
+### 任务执行模型
+
+```
+前端(Vue3) → FastAPI(webui.py) → 写 jobs=QUEUED ──► worker.py(DB 轮询原子领取)
+                                                     │
+                                              Popen CLI 子进程（attempt-N 日志）
+                                                     │
+                         SUCCESS/FAILED/CANCELLED ◄──┘
+```
+
+- 提交/取消/展示由 webui 负责；领取/执行由 Worker 负责（`shell=False`，argv 仅由
+  校验后的 TaskSpec 构造，杜绝注入）。
+- 状态机：`PENDING→QUEUED→ASSIGNED→RUNNING→SUCCESS/FAILED/CANCELLED/INTERRUPTED`；
+  QUEUED/PAUSED 互转；终态禁止回迁；`retry_count < max_retry` 时 FAILED 自动回队
+  （v1 默认关闭）。
+- 日志/进度按 attempt 分目录：`runtime/jobs/{job_id}/attempt-{n}.out.log`（长期保留）
+  + `attempt-{n}.jsonl`（终态删除）；进度 JSONL 事件 `stage/written/progress/done/error`。
+- 支持的 task_type：`KLINE / TRADES / FUNDING_RATE / MARK_PRICE / INDEX_PRICE /
+  OPEN_INTEREST / INSTRUMENTS / LATENCY_PROBE / QUALITY_CHECK / ASSET_REFRESH`。
+- WebSocket `/ws`（DB 轮询 Hub，1~2s）广播 `job_update` / `worker_update` + 30s ping；
+  前端断线指数退避重连；日志流不走 WS（REST 字节偏移轮询）。
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run build        # 产物输出到 app/web/static/（webui.py 自动托管）
+npm run dev          # 开发：vite dev（proxy /api、/ws → 127.0.0.1:8000）
+```
+
+8 个菜单（hash 路由）：仪表盘 / 数据资产 / 数据采集 / 任务中心 / 数据质量 /
+实时监控 / 研究中心（路线页）/ 系统管理。主题走 CSS 变量（`frontend/src/styles/theme.css`）。
+
+前端支持浅色、深色和跟随系统主题，设置保存在浏览器本地 `okx-theme`。数据资产页面
+按交易对摘要分页加载；选择交易对后才读取其数据集，避免一次渲染完整资产树。
+
+### 降级行为
+
+- DB 不可达：webui 可启动（相关端点报错/503，前端降级显示）；Worker 无法认领（重试等待）。
+- Worker 被强杀：重启时把本 worker 名下心跳过期的 ASSIGNED/RUNNING 置 INTERRUPTED。
+- Web 重启：运行中任务不受影响（任务归 Worker/DB 管）。
+
+健康检查、仪表盘和实时监控共用同一份 20 秒缓存的健康快照。Worker 是否在线由最近
+30 秒心跳决定；`IDLE` / `BUSY` 仅表示其最近一次运行状态。仪表盘的“存储占用”使用
+PostgreSQL 当前数据库物理大小，包含 TimescaleDB chunks 和索引。
+
+### 测试分层
+
+```bash
+# 默认离线测试：不写入业务数据库
+python -m pytest -q
+
+# 需要 TimescaleDB 的集成测试；仅对显式配置的独立测试库执行
+python -m pytest -m integration -q
+```
+
+数据库集成测试不得指向生产或日常使用的 `okx_data`。Worker 的 `concurrency` 默认为 1；
+提高该值后，同一 Worker 会以有界线程池并发执行多个已认领任务，取消流程会先终止、
+超时后强制结束子进程。
+
 ## 日志规范
 
 所有脚本统一日志规则（`app/utils/logger.py`）。

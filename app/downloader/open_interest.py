@@ -28,12 +28,13 @@ class OpenInterestDownloader:
         self.client = client or OKXClient()
         self.cfg = cfg or Config()
 
-    def download(self, inst_id: str, bar: str = "current") -> int:
+    def download(self, inst_id: str, bar: str = "current", on_progress=None) -> int:
         """下载当前 OI 快照并入库
 
         Args:
             inst_id: 产品ID，如 BTC-USDT-SWAP
             bar: 数据粒度标记（默认 "current"，表示单点快照）
+            on_progress: 可选回调 on_progress(batch_written)
         Returns:
             int: 写入/更新数量
         """
@@ -51,6 +52,8 @@ class OpenInterestDownloader:
 
         record["bar"] = bar
         written = self._insert([record])
+        if on_progress is not None:
+            on_progress(written)
         self._record_success(inst_id, bar, record["ts"])
         logger.info("OpenInterest 下载完成: %s | oi=%s | ts=%s", inst_id, record["oi"], record["ts"])
         return written

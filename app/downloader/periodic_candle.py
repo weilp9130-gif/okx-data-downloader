@@ -42,6 +42,7 @@ class PeriodicCandleDownloader:
         bar: str = "1D",
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
+        on_progress=None,
     ) -> int:
         """下载指定时间范围的周期 K 线
 
@@ -50,6 +51,7 @@ class PeriodicCandleDownloader:
             bar: 时间粒度，默认 1D
             start: 开始时间（UTC，含）
             end: 结束时间（UTC，含）
+            on_progress: 可选回调 on_progress(batch_written)
 
         Returns:
             int: 写入数量
@@ -98,6 +100,8 @@ class PeriodicCandleDownloader:
             return 0
 
         written = self._upsert(records)
+        if on_progress is not None:
+            on_progress(written)
         # OKX 返回最新在前：records[0] 最新，records[-1] 最旧
         self._update_sync_state(inst_id, bar, records[0]["ts"], records[-1]["ts"])
         logger.info("%s 下载完成: %s | %s | %d 条", self.label, inst_id, bar, written)

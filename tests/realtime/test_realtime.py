@@ -1,6 +1,7 @@
 """实时模块单元测试（离线）"""
 
 import unittest
+import pytest
 from datetime import datetime, timezone
 
 from app.realtime.okx_ws import OKXWebSocketClient
@@ -155,6 +156,7 @@ class TestOrderBookHandler(unittest.TestCase):
         self.assertIsNone(record)
 
 
+@pytest.mark.integration
 class TestTradeWriter(unittest.TestCase):
     def test_writer_put(self):
         writer = TradeWriter()

@@ -1,6 +1,7 @@
 """Phase 10 测试：OrderBook 频道能力校验 / 周期采样 / DATA_CONFLICT / Retention 配置"""
 
 import unittest
+import pytest
 from datetime import datetime, timezone
 
 from app.quality.conflict import DataConflictDetector, canonical_hash, trade_core_hash
@@ -122,6 +123,7 @@ class TestCanonicalHash(unittest.TestCase):
         self.assertNotEqual(canonical_hash(ws), canonical_hash(rest))
 
 
+@pytest.mark.integration
 class TestDataConflictDetector(unittest.TestCase):
     INST = "CONFLICT-TEST-SWAP"
 

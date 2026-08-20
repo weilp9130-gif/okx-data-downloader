@@ -32,6 +32,7 @@ class TradesDownloader:
         limit: int = 100,
         max_pages: int = 10,
         after_trade_id: Optional[str] = None,
+        on_progress=None,
     ) -> int:
         """下载指定时间范围的 trades
 
@@ -42,6 +43,7 @@ class TradesDownloader:
             limit: 每页数量
             max_pages: 最大分页数
             after_trade_id: 从此 tradeId 之后开始获取（用于断线恢复）
+            on_progress: 可选回调 on_progress(batch_written)
 
         Returns:
             int: 写入数量
@@ -99,7 +101,7 @@ class TradesDownloader:
                 break
             after = oldest_trade_id
 
-        written = self._insert(records)
+        written = self._insert(records, on_progress=on_progress)
         self._update_sync_state(inst_id, last_trade_id, last_ts)
 
         logger.info(
@@ -129,7 +131,7 @@ class TradesDownloader:
 
     BULK_SIZE = 200
 
-    def _insert(self, rows: List[dict]) -> int:
+    def _insert(self, rows: List[dict], on_progress=None) -> int:
         if not rows:
             return 0
         # Raw 数据不可静默覆盖：同键不同 payload 登记 DATA_CONFLICT 后剔除
@@ -141,7 +143,10 @@ class TradesDownloader:
         written = 0
         for i in range(0, len(safe_rows), self.BULK_SIZE):
             batch = safe_rows[i : i + self.BULK_SIZE]
-            written += self._insert_batch(batch)
+            batch_written = self._insert_batch(batch)
+            written += batch_written
+            if on_progress is not None:
+                on_progress(batch_written)
         return written
 
     def _insert_batch(self, rows: List[dict]) -> int:

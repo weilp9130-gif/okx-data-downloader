@@ -1,6 +1,7 @@
 """Trade 聚合单元测试"""
 
 import unittest
+import pytest
 from datetime import datetime, timezone
 
 from app.aggregation.trades import TradeAggregator
@@ -24,6 +25,7 @@ class TestOrderBookFactorCalculator(unittest.TestCase):
         self.assertIsNone(OrderBookFactorCalculator.calculate([], []))
 
 
+@pytest.mark.integration
 class TestTradeAggregator(unittest.TestCase):
     def test_aggregate_empty(self):
         agg = TradeAggregator()

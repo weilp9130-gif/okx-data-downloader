@@ -9,16 +9,19 @@
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
     PrimaryKeyConstraint,
     String,
+    UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from .database import Base
 
@@ -754,3 +757,215 @@ class LatencyProbeStats(Base):
 
     def __repr__(self) -> str:
         return f"<LatencyProbeStats(window={self.window_start}, {self.metric}={self.value})>"
+
+
+# ====================================================================
+# metadata schema：平台运营表（OKX Quant Platform）
+# ====================================================================
+
+METADATA_SCHEMA = "metadata"
+
+
+class TaskJob(Base):
+    """任务（jobs）：平台任务队列，Worker 通过 DB 原子认领执行
+
+    状态机：PENDING→QUEUED→ASSIGNED→RUNNING→SUCCESS/FAILED/CANCELLED/INTERRUPTED。
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        Index("ix_jobs_status_created", "status", "created_at"),
+        Index("ix_jobs_group", "group_id"),
+        Index("ix_jobs_parent", "parent_job_id"),
+        Index("ix_jobs_worker", "assigned_worker_id"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    group_id = Column(UUID(as_uuid=True), nullable=True)
+    task_no = Column(String(30), nullable=False)
+    task_type = Column(String(30), nullable=False)
+    params = Column(JSONB, nullable=False)
+    status = Column(String(20), nullable=False, default="PENDING")
+    priority = Column(Integer, nullable=False, default=0)
+    required_capability = Column(String(30), nullable=True)
+    rate_group = Column(String(30), nullable=True)
+    assigned_worker_id = Column(UUID(as_uuid=True), nullable=True)
+    node = Column(String(50), nullable=True)
+    pid = Column(Integer, nullable=True)
+    exit_code = Column(Integer, nullable=True)
+    attempt_no = Column(Integer, nullable=False, default=0)
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retry = Column(Integer, nullable=False, default=0)
+    parent_job_id = Column(UUID(as_uuid=True), nullable=True)
+    depends_on_job_id = Column(UUID(as_uuid=True), nullable=True)
+    workflow_id = Column(UUID(as_uuid=True), nullable=True)
+    progress = Column(JSONB, nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    error = Column(String(2000), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<TaskJob(task_no={self.task_no}, type={self.task_type}, status={self.status})>"
+
+
+class JobAttempt(Base):
+    """任务执行记录（job_attempts）：每次 attempt 的日志/进度分文件"""
+
+    __tablename__ = "job_attempts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt_no", name="uq_attempt_job_no"),
+        Index("ix_attempts_job", "job_id"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    job_id = Column(UUID(as_uuid=True), ForeignKey(f"{METADATA_SCHEMA}.jobs.id"), nullable=False)
+    attempt_no = Column(Integer, nullable=False)
+    worker_id = Column(UUID(as_uuid=True), nullable=True)
+    pid = Column(Integer, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    exit_code = Column(Integer, nullable=True)
+    log_path = Column(String(500), nullable=True)
+    progress_path = Column(String(500), nullable=True)
+    error = Column(String(2000), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<JobAttempt(job={self.job_id}, no={self.attempt_no}, exit={self.exit_code})>"
+
+
+class Worker(Base):
+    """任务 Worker：独立进程注册行（capabilities 过滤认领）"""
+
+    __tablename__ = "workers"
+    __table_args__ = (
+        Index("ix_workers_status", "status"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    name = Column(String(50), nullable=False)
+    node = Column(String(50), nullable=True)
+    hostname = Column(String(100), nullable=True)
+    ip = Column(String(50), nullable=True)
+    python_version = Column(String(30), nullable=True)
+    os = Column(String(100), nullable=True)
+    worker_version = Column(String(20), nullable=True)
+    capabilities = Column(JSONB, nullable=False, default=list)
+    status = Column(String(20), nullable=False, default="IDLE")
+    capacity = Column(Integer, nullable=False, default=1)
+    last_heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    current_task_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(String(2000), nullable=True)
+    registered_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<Worker(name={self.name}, status={self.status})>"
+
+
+class AuditLog(Base):
+    """审计日志（audit_log）：平台管理操作记录"""
+
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index("ix_audit_ts", "ts"),
+        Index("ix_audit_target", "target_type", "target_id"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    actor = Column(String(50), nullable=False, default="local")
+    action = Column(String(50), nullable=False)
+    target_type = Column(String(50), nullable=True)
+    target_id = Column(String(100), nullable=True)
+    detail = Column(JSONB, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AuditLog(ts={self.ts}, action={self.action}, target={self.target_type})>"
+
+
+class DataAsset(Base):
+    """数据资产（data_asset）：期望存在的数据集×交易对组合（无状态字段）"""
+
+    __tablename__ = "data_asset"
+    __table_args__ = (
+        UniqueConstraint("exchange", "market", "inst_id", "dataset", "bar",
+                         name="uq_asset_identity"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    exchange = Column(String(20), nullable=False, default="OKX")
+    market = Column(String(20), nullable=False, default="SWAP")
+    inst_id = Column(String(50), nullable=False)
+    dataset = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<DataAsset(inst={self.inst_id}, dataset={self.dataset}, bar={self.bar})>"
+
+
+class DataAssetState(Base):
+    """资产状态（data_asset_state）：动态计算结果，状态只存在于此表"""
+
+    __tablename__ = "data_asset_state"
+    __table_args__ = (
+        Index("ix_asset_state_asset", "asset_id"),
+        Index("ix_asset_state_status", "status"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    asset_id = Column(BigInteger, ForeignKey(f"{METADATA_SCHEMA}.data_asset.id"), nullable=False)
+    earliest_ts = Column(DateTime(timezone=True), nullable=True)
+    latest_ts = Column(DateTime(timezone=True), nullable=True)
+    row_count = Column(BigInteger, nullable=False, default=0)
+    expected_rows = Column(BigInteger, nullable=True)
+    missing_rows = Column(BigInteger, nullable=True)
+    duplicates = Column(BigInteger, nullable=True)
+    invalid_rows = Column(BigInteger, nullable=True)
+    quality_score = Column(Numeric(5, 1), nullable=True)
+    freshness_lag_sec = Column(Numeric(20, 4), nullable=True)
+    status = Column(String(20), nullable=False, default="NO_DATA")
+    checked_at = Column(DateTime(timezone=True), nullable=True)
+    full_recount_at = Column(DateTime(timezone=True), nullable=True)
+    last_check_at = Column(DateTime(timezone=True), nullable=True)
+    detail = Column(JSONB, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<DataAssetState(asset={self.asset_id}, status={self.status}, rows={self.row_count})>"
+
+
+class DatasetDefinition(Base):
+    """数据集定义（dataset_definition）：「应该有什么数据」，质量/资产引导基准"""
+
+    __tablename__ = "dataset_definition"
+    __table_args__ = (
+        PrimaryKeyConstraint("dataset", "bar", "version"),
+        {"schema": METADATA_SCHEMA},
+    )
+
+    dataset = Column(String(50), nullable=False)
+    bar = Column(String(10), nullable=False, default="")
+    version = Column(String(10), nullable=False, default="v1")
+    table_name = Column(String(50), nullable=False)
+    primary_time_column = Column(String(30), nullable=False, default="ts")
+    source = Column(String(20), nullable=True)
+    interval_seconds = Column(Integer, nullable=True)
+    expected_freshness_sec = Column(Integer, nullable=True)
+    retention_days = Column(Integer, nullable=False, default=0)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<DatasetDefinition(dataset={self.dataset}, bar={self.bar}, table={self.table_name})>"

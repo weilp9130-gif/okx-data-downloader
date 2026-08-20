@@ -88,6 +88,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy-benchmark", choices=["none", "light", "heavy"],
                         default="none",
                         help="模拟策略负载：none/light/heavy（heavy_v1，独立 worker）")
+    parser.add_argument("--progress-file", dest="progress_file",
+                        help="任务进度 JSONL 输出路径（Web Worker 使用）")
     return parser
 
 
@@ -228,7 +230,8 @@ def _on_close(engine, summary_rows: List[dict], stats_rows: List[dict]) -> None:
 async def _ticker(summarizer: WindowSummarizer, stats: StatsRegistry,
                   writer: LatencySampleWriter, strategy: MockStrategy,
                   summary_interval: int, stop_ev: threading.Event,
-                  lag_monitor: Optional[EventLoopLagMonitor] = None) -> None:
+                  lag_monitor: Optional[EventLoopLagMonitor] = None,
+                  progress=None) -> None:
     """每秒 tick（关闭窗口）；每 summary_interval 输出队列/CPU/event-loop lag
     遥测（P1-23 / C-P1-2）。"""
     last_telemetry = time.monotonic()   # 避免首个 tick 立即触发遥测
@@ -248,6 +251,14 @@ async def _ticker(summarizer: WindowSummarizer, stats: StatsRegistry,
             cpu_pct = ((cpu_now - cpu_base) / (wall_now - wall_base) * 100.0
                        if wall_now > wall_base else 0.0)
             cpu_base, wall_base = cpu_now, wall_now
+            if progress is not None:
+                try:
+                    progress.emit({
+                        "type": "progress",
+                        "written": stats.totals().get(STAT_SAMPLES_PARSED, 0),
+                    })
+                except Exception:
+                    pass
             if lag_monitor is not None:
                 lag = lag_monitor.summary()
                 logger.info(
@@ -264,7 +275,8 @@ async def _ticker(summarizer: WindowSummarizer, stats: StatsRegistry,
             )
 
 
-async def _run(args, insts: List[str], channels: List[str], ping_timeout: float) -> None:
+async def _run(args, insts: List[str], channels: List[str], ping_timeout: float,
+               progress=None) -> None:
     engine = get_engine()
     stats = StatsRegistry()
     summarizer = WindowSummarizer(
@@ -307,7 +319,7 @@ async def _run(args, insts: List[str], channels: List[str], ping_timeout: float)
     lag_task = asyncio.create_task(lag_monitor.run(stop_ev))
     ticker_task = asyncio.create_task(
         _ticker(summarizer, stats, writer, strategy, args.summary_interval,
-                stop_ev, lag_monitor=lag_monitor))
+                stop_ev, lag_monitor=lag_monitor, progress=progress))
 
     start = time.monotonic()
     try:
@@ -397,7 +409,17 @@ def main() -> int:
     if args.strategy_benchmark == "heavy":
         logger.info("Strategy workload: %s", WORKLOAD)
     init_db()
-    asyncio.run(_run(args, insts, channels, ping_timeout))
+    from app.utils.progress import ProgressWriter
+    progress = ProgressWriter(args.progress_file).open() if args.progress_file else None
+    try:
+        if progress is not None:
+            progress.stage("probe")
+        asyncio.run(_run(args, insts, channels, ping_timeout, progress=progress))
+        if progress is not None:
+            progress.done()
+    finally:
+        if progress is not None:
+            progress.close()
     return 0
 
 

@@ -27,11 +27,12 @@ class InstrumentDownloader:
         self.client = client or OKXClient()
         self.cfg = cfg or Config()
 
-    def download(self, inst_type: str = "SWAP") -> int:
+    def download(self, inst_type: str = "SWAP", on_progress=None) -> int:
         """下载指定类型（或多个类型）的 instruments 并入库
 
         Args:
             inst_type: 产品类型，如 SWAP / SPOT / FUTURES / OPTION / MARGIN
+            on_progress: 可选回调 on_progress(batch_written)
 
         Returns:
             int: 写入/更新的数量
@@ -49,6 +50,8 @@ class InstrumentDownloader:
             return 0
 
         written = self._upsert(normalized)
+        if on_progress is not None:
+            on_progress(written)
         logger.info(
             "Instruments 下载完成: inst_type=%s | 共 %d 条 | 写入 %d 条",
             inst_type, len(normalized), written

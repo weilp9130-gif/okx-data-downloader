@@ -1,11 +1,13 @@
 """Phase 8 Recovery 单元测试"""
 
 import unittest
+import pytest
 from datetime import datetime, timezone
 
 from app.realtime.recovery import DataGapStore, RecoveryEventStore
 
 
+@pytest.mark.integration
 class TestRecoveryEventStore(unittest.TestCase):
     def test_start_finish(self):
         store = RecoveryEventStore()
@@ -24,6 +26,7 @@ class TestRecoveryEventStore(unittest.TestCase):
             self.assertEqual(row["rows_recovered"], 100)
 
 
+@pytest.mark.integration
 class TestDataGapStore(unittest.TestCase):
     def test_register_dedup(self):
         store = DataGapStore()

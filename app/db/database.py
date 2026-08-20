@@ -135,6 +135,23 @@ def init_db() -> None:
     )
 
     engine = get_engine()
+
+    # metadata schema（平台运营表，普通表）
+    from .models import (
+        AuditLog,
+        DataAsset,
+        DataAssetState,
+        DatasetDefinition,
+        JobAttempt,
+        TaskJob,
+        Worker,
+    )
+    from .models import METADATA_SCHEMA
+
+    with engine.connect() as conn:
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{METADATA_SCHEMA}"'))
+        conn.commit()
+
     Base.metadata.create_all(bind=engine)
     logger.info("数据库表结构创建完成")
 

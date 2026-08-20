@@ -1,6 +1,9 @@
 """数据质量验证单元测试"""
 
 import unittest
+import pytest
+
+pytestmark = pytest.mark.integration
 
 from app.quality.validator import DataQualityValidator
 

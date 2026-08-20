@@ -602,6 +602,24 @@ class OKXClient:
         return candles
 
     # ------------------------------------------------------------------
+    # 服务器时间（健康检查用）
+    # ------------------------------------------------------------------
+    def get_server_time(self) -> Optional[dict]:
+        """获取 OKX 服务器时间
+
+        Returns:
+            dict 或 None: {"ts": <毫秒时间戳>, "datetime": <ISO字符串>}
+        """
+        try:
+            data = self._get("/api/v5/public/time")
+        except Exception as e:
+            logger.warning("OKX server time 请求失败: %s", e)
+            return None
+        if not data:
+            return None
+        return data[0]
+
+    # ------------------------------------------------------------------
     # 当前实时资金费率
     # ------------------------------------------------------------------
     def get_current_funding_rate(self, inst_id: str) -> Optional[dict]:

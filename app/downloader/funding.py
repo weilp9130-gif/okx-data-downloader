@@ -43,6 +43,7 @@ class FundingRateDownloader:
         start: datetime,
         end: datetime,
         overwrite: bool = False,
+        on_progress=None,
     ) -> int:
         """下载时间段内的资金费率
 
@@ -51,6 +52,7 @@ class FundingRateDownloader:
             start: 开始时间（UTC, naive）
             end: 结束时间（UTC, naive）
             overwrite: 是否覆盖已有数据
+            on_progress: 可选回调 on_progress(batch_written)
 
         Returns:
             int: 写入数量
@@ -106,6 +108,8 @@ class FundingRateDownloader:
             before_ms = oldest_ts   # 继续往前翻更早的数据
 
         written = self._save_funding(inst_id, collected, overwrite)
+        if on_progress is not None:
+            on_progress(written)
 
         logger.info(
             f"资金费率下载完成: {inst_id} | 共 {written} 条, "
